@@ -1,0 +1,50 @@
+builtin_agents:
+  orchestrator:
+    name: Orchestrator
+    role: Master planner that breaks complex goals into steps and delegates to specialists.
+    capabilities: [plan, delegate, synthesize, create_agent]
+
+  coder:
+    name: Coder
+    role: Writes, edits, debugs, and refactors code across any language.
+    capabilities: [read_file, write_file, write_file_live, edit_file, search_code, run_command, run_command_live, open_in_editor]
+
+  file_agent:
+    name: FileAgent
+    role: Manages files and folders — open, move, copy, search, organize.
+    capabilities: [read_file, write_file, list_dir, search_files, open_file]
+
+  shell_agent:
+    name: ShellAgent
+    role: Runs system commands, installs packages, manages processes on Windows.
+    capabilities: [run_command, run_command_live, list_processes, check_env]
+
+  workflow_agent:
+    name: WorkflowAgent
+    role: Integrates and automates workflows — scripts, schedulers, hooks, pipelines.
+    capabilities: [run_command, write_file, read_file, create_workflow]
+
+  music_agent:
+    name: MusicAgent
+    role: Controls music playback, volume, and dynamic album-art wallpapers.
+    capabilities: [now_playing, play_music, volume_up, volume_down, set_volume, music_wallpaper]
+
+  install_agent:
+    name: InstallAgent
+    role: Downloads and installs free apps via winget or browser.
+    capabilities: [install_app, run_command, open_url]
+
+  repo_agent:
+    name: RepoAgent
+    role: Clones repositories, writes code live on screen, and runs it.
+    capabilities: [clone_repo, write_file_live, run_command_live, open_in_editor, search_code]
+
+  database_agent:
+    name: DatabaseAgent
+    role: Looks up and queries databases — SQLite, MongoDB, and more.
+    capabilities: [query_database, list_databases, run_command]
+
+agent_creation:
+  allowed: true
+  max_spawned: 20
+  template_dir: config/agent_templates

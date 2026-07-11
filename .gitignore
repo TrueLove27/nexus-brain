@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+.env.*
+
+# Nexus runtime data (local memory, logs, inbox)
+data/logs/
+data/inbox/
+data/memory.db
+data/postgres.marker
+data/user_preferences.md
+
+# IDE
+.cursor/
+.vscode/
+*.swp
+
+# OS
+Thumbs.db
+Desktop.ini
+
+# Docker volumes (if any local bind mounts)
+postgres_data/

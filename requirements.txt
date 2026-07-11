@@ -1,0 +1,9 @@
+pyyaml>=6.0
+requests>=2.31
+rich>=13.7
+fastapi>=0.110
+uvicorn>=0.27
+pillow>=10.0
+pycaw>=20240210
+comtypes>=1.2
+psycopg[binary]>=3.1

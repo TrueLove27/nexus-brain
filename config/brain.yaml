@@ -1,0 +1,39 @@
+name: Nexus
+version: "1.0"
+
+llm:
+  provider: ollama
+  model: llama3.2  # alternative tested: qwen2.5:7b (same eval score, larger)
+  embed_model: nomic-embed-text
+  base_url: http://localhost:11434
+  temperature: 0.3
+  max_tokens: 4096
+
+brain:
+  data_dir: data
+  memory_db: data/memory.db
+  storage: postgres
+  postgres:
+    host: localhost
+    port: 5432
+    database: nexus_brain
+    user: postgres
+    password: postgres
+  max_context_memories: 8
+  proactive_interval_seconds: 30
+  max_agent_iterations: 30
+  max_parse_retries: 5
+  stuck_action_threshold: 3
+  wind_down_at_iteration: 24
+  learn_from_every_task: true
+
+paths:
+  workspace: C:\Users\cheki\nexus-brain
+  inbox: data/inbox
+  agents_dir: data/spawned_agents
+  logs_dir: data/logs
+
+proactive:
+  enabled: true
+  watch_inbox: true
+  scan_on_start: true

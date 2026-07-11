@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Nexus Live</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    background: #0a0a0f;
+    color: #e0e0e0;
+    height: 100vh;
+    display: grid;
+    grid-template-rows: auto 1fr;
+    overflow: hidden;
+  }
+  header {
+    padding: 16px 24px;
+    background: linear-gradient(135deg, #0d1b2a, #1b263b);
+    border-bottom: 1px solid #1e3a5f;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+  header h1 { font-size: 1.3rem; color: #00d4ff; letter-spacing: 2px; }
+  header .status { font-size: 0.8rem; color: #4ade80; }
+  #command-bar {
+    flex: 1;
+    display: flex;
+    gap: 8px;
+    max-width: 800px;
+    margin-left: auto;
+  }
+  #goal-input {
+    flex: 1;
+    padding: 10px 16px;
+    border-radius: 8px;
+    border: 1px solid #1e3a5f;
+    background: #0a0a0f;
+    color: #fff;
+    font-size: 1rem;
+    outline: none;
+  }
+  #goal-input:focus { border-color: #00d4ff; box-shadow: 0 0 12px #00d4ff33; }
+  #run-btn {
+    padding: 10px 24px;
+    border-radius: 8px;
+    border: none;
+    background: #00d4ff;
+    color: #0a0a0f;
+    font-weight: 700;
+    cursor: pointer;
+  }
+  #run-btn:hover { background: #33ddff; }
+  main {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: 1fr 1fr;
+    gap: 2px;
+    background: #1e3a5f;
+    padding: 2px;
+  }
+  .panel {
+    background: #0d1117;
+    padding: 16px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+  .panel h2 {
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    color: #00d4ff;
+    margin-bottom: 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid #1e3a5f;
+  }
+  .feed { flex: 1; overflow-y: auto; font-family: 'Cascadia Code', 'Consolas', monospace; font-size: 0.82rem; }
+  .event { padding: 6px 0; border-bottom: 1px solid #111; animation: fadeIn 0.3s; }
+  .event .type { color: #00d4ff; font-weight: 600; }
+  .event .time { color: #555; font-size: 0.7rem; }
+  .event.tool_start .type { color: #fbbf24; }
+  .event.task_done .type { color: #4ade80; }
+  .event.code_typing .type { color: #a78bfa; }
+  .event.terminal_output .type { color: #34d399; }
+  .event.now_playing .type { color: #f472b6; }
+  #code-theater {
+    background: #0d1117;
+    color: #a8d8a8;
+    white-space: pre-wrap;
+    word-break: break-all;
+    line-height: 1.5;
+    min-height: 100px;
+  }
+  #terminal { color: #34d399; }
+  #music-info { color: #f472b6; font-size: 1.1rem; padding: 8px 0; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; } }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+  .working { animation: pulse 1.5s infinite; color: #fbbf24; }
+</style>
+</head>
+<body>
+<header>
+  <h1>NEXUS LIVE</h1>
+  <span class="status" id="status">● Connected</span>
+  <div id="command-bar">
+    <input id="goal-input" placeholder="Type anything — install GitHub Desktop, play Bohemian Rhapsody, clone a repo..." autofocus>
+    <button id="run-btn" onclick="runGoal()">GO</button>
+  </div>
+</header>
+<main>
+  <div class="panel" style="grid-row: span 2">
+    <h2>Live Activity</h2>
+    <div class="feed" id="activity-feed"></div>
+  </div>
+  <div class="panel">
+    <h2>Code Theater</h2>
+    <div id="code-theater">Waiting for agent to write code...</div>
+  </div>
+  <div class="panel">
+    <h2>Terminal + Music</h2>
+    <div id="music-info">🎵 No music playing</div>
+    <div class="feed" id="terminal"></div>
+  </div>
+</main>
+<script>
+const feed = document.getElementById('activity-feed');
+const terminal = document.getElementById('terminal');
+const codeTheater = document.getElementById('code-theater');
+const musicInfo = document.getElementById('music-info');
+const status = document.getElementById('status');
+
+function addEvent(ev) {
+  const div = document.createElement('div');
+  div.className = 'event ' + ev.type;
+  const time = (ev.time || '').split('T')[1]?.slice(0,8) || '';
+  let detail = '';
+  if (ev.goal) detail = ev.goal.slice(0,80);
+  else if (ev.tool) detail = ev.tool + ' ' + JSON.stringify(ev.args||{}).slice(0,60);
+  else if (ev.text) detail = ev.text.slice(0,120);
+  else if (ev.title) detail = ev.artist + ' — ' + ev.title;
+  else if (ev.result) detail = String(ev.result).slice(0,120);
+  else detail = JSON.stringify(ev).slice(0,100);
+  div.innerHTML = `<span class="time">${time}</span> <span class="type">${ev.type}</span> ${detail}`;
+  feed.prepend(div);
+  if (feed.children.length > 200) feed.lastChild.remove();
+}
+
+function handleEvent(ev) {
+  if (ev.type === 'heartbeat') return;
+  addEvent(ev);
+  if (ev.type === 'terminal_output') {
+    const line = document.createElement('div');
+    line.textContent = ev.text;
+    terminal.appendChild(line);
+    terminal.scrollTop = terminal.scrollHeight;
+  }
+  if (ev.type === 'code_typing') {
+    codeTheater.textContent = ev.snippet || '';
+    codeTheater.parentElement.querySelector('h2').textContent =
+      `Code Theater — ${ev.path||''} (${ev.progress||0}%)`;
+  }
+  if (ev.type === 'code_write_start') {
+    codeTheater.textContent = '';
+    status.textContent = '● Working...';
+    status.className = 'status working';
+  }
+  if (ev.type === 'task_done' || ev.type === 'task_error') {
+    status.textContent = '● Ready';
+    status.className = 'status';
+  }
+  if (ev.type === 'now_playing' && ev.title) {
+    musicInfo.textContent = `🎵 ${ev.artist} — ${ev.title}`;
+  }
+}
+
+async function runGoal() {
+  const goal = document.getElementById('goal-input').value.trim();
+  if (!goal) return;
+  document.getElementById('goal-input').value = '';
+  status.textContent = '● Working...';
+  status.className = 'status working';
+  await fetch('/run', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({goal}) });
+}
+
+document.getElementById('goal-input').addEventListener('keydown', e => { if (e.key==='Enter') runGoal(); });
+
+const es = new EventSource('/events');
+es.onmessage = e => { try { handleEvent(JSON.parse(e.data)); } catch(err){} };
+es.onerror = () => { status.textContent = '● Reconnecting...'; status.style.color = '#fbbf24'; };
+
+setInterval(async () => {
+  try {
+    const r = await fetch('/now-playing');
+    const d = await r.json();
+    if (d.playing && d.title) musicInfo.textContent = `🎵 ${d.artist} — ${d.title}`;
+  } catch(e) {}
+}, 5000);
+</script>
+</body>
+</html>

@@ -1,0 +1,31 @@
+# Add database connection strings here (all free/local options supported)
+databases:
+  default_sqlite:
+    type: sqlite
+    path: C:\Users\cheki\nexus-brain\data\memory.db
+
+  nexus_postgres:
+    type: postgres
+    host: localhost
+    port: 5432
+    database: nexus_brain
+    user: postgres
+    password: postgres
+
+  # Example — uncomment and edit:
+  # my_mongo:
+  #   type: mongodb
+  #   uri: mongodb://localhost:27017
+  #   database: mydb
+
+music:
+  wallpaper_enabled: true
+  animation_fps: 3
+  wallpaper_dir: data/wallpaper
+  poll_interval_seconds: 2
+
+live:
+  api_port: 9477
+  hotkey: "win+shift+n"
+  open_editor: none   # cursor | code | none — desktop app shows work in Live Workspace
+  typewriter_delay_ms: 12
