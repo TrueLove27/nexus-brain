@@ -20,6 +20,7 @@ class ToolRegistry:
         from .installer import register_installer_tools
         from .repo import register_repo_tools
         from .database import register_database_tools
+        from .github import register_github_tools
 
         register_filesystem_tools(self)
         register_shell_tools(self)
@@ -29,6 +30,7 @@ class ToolRegistry:
         register_installer_tools(self)
         register_repo_tools(self)
         register_database_tools(self)
+        register_github_tools(self)
 
     def register(self, name: str, description: str, parameters: dict,
                  handler: Callable[..., str]) -> None:

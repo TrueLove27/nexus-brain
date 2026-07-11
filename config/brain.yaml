@@ -27,6 +27,10 @@ brain:
   wind_down_at_iteration: 24
   learn_from_every_task: true
 
+portfolio:
+  engine_root: C:\Users\cheki\Desktop\New folder (2)\portfolio-growth-engine
+  project: nexus-brain
+
 paths:
   workspace: C:\Users\cheki\nexus-brain
   inbox: data/inbox

@@ -51,6 +51,15 @@ py main.py daemon
 ```
 Then drop task files into `data/inbox/` — any `.txt` file with a goal description.
 
+### Portfolio growth session (July 13, 9 PM - midnight)
+```powershell
+py main.py portfolio          # drop next portfolio-growth-engine task into inbox
+py main.py session 3          # 3-hour timed session on nexus-brain backlog
+py main.py health             # shows portfolio_pending / portfolio_done counts
+```
+
+Integrated with `portfolio-growth-engine` — reads tasks from its backlog, drops them into inbox, and marks them done after success.
+
 ### Train Nexus for YOUR workflow
 ```powershell
 py main.py teach "My projects live in C:\Users\cheki\projects"

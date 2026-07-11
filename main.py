@@ -6,6 +6,8 @@ Usage:
   py main.py                    # Interactive mode
   py main.py run "your goal"    # One-shot task
   py main.py daemon             # Proactive background mode
+  py main.py session [hours]    # Timed portfolio work session (default 3h)
+  py main.py portfolio          # Drop next portfolio task into inbox
   py main.py agents             # List all agents
   py main.py health             # Check system status
   py main.py teach "preference" # Train Nexus with a preference
@@ -105,10 +107,45 @@ def cmd_daemon(engine: NexusEngine):
         console.print("\n[yellow]Daemon stopped.[/yellow]")
 
 
+def cmd_session(engine: NexusEngine, hours: float = 3.0):
+    from core.session_runner import SessionRunner
+
+    console.print(f"\n[bold]Starting {hours}h portfolio session on nexus-brain[/bold]\n")
+    runner = SessionRunner(engine, hours=hours)
+
+    def on_task(task: str):
+        console.print(f"[cyan]Task:[/cyan] {task[:100]}")
+
+    with console.status("[cyan]Session running..."):
+        summary = runner.run(on_task=on_task)
+
+    console.print(Panel(
+        f"Cycles: {summary['cycles']}\n"
+        f"Completed: {summary['completed']}\n"
+        f"Log: data/logs/session.jsonl",
+        title="Session Summary",
+        border_style="green",
+    ))
+
+
+def cmd_portfolio(engine: NexusEngine):
+    from core.portfolio_bridge import PortfolioBridge
+
+    bridge = PortfolioBridge(inbox_dir=engine.root / "data" / "inbox")
+    task = bridge.next_unchecked_task()
+    if not task:
+        console.print("[yellow]No pending portfolio tasks.[/yellow]")
+        return
+
+    path = bridge.drop_next_task(str(engine.root))
+    console.print(f"[green]Dropped into inbox:[/green] {path}")
+    console.print(f"[cyan]Task:[/cyan] {task}")
+
+
 def interactive_mode(engine: NexusEngine):
     show_banner()
     cmd_health(engine)
-    console.print("\n[dim]Commands: run <goal> | agents | teach <note> | recall <query> | spawn <name> <role> | quit[/dim]\n")
+    console.print("\n[dim]Commands: run <goal> | session [hours] | portfolio | agents | teach <note> | recall <query> | spawn <name> <role> | quit[/dim]\n")
 
     while True:
         try:
@@ -144,6 +181,14 @@ def interactive_mode(engine: NexusEngine):
         if user_input.lower().startswith("run "):
             cmd_run(engine, user_input[4:])
             continue
+        if user_input.lower().startswith("session"):
+            parts = user_input.split()
+            hrs = float(parts[1]) if len(parts) > 1 else 3.0
+            cmd_session(engine, hrs)
+            continue
+        if user_input.lower() == "portfolio":
+            cmd_portfolio(engine)
+            continue
 
         cmd_run(engine, user_input)
 
@@ -170,6 +215,13 @@ def main():
     elif cmd == "daemon":
         show_banner()
         cmd_daemon(engine)
+    elif cmd == "session":
+        show_banner()
+        hrs = float(sys.argv[2]) if len(sys.argv) > 2 else 3.0
+        cmd_session(engine, hrs)
+    elif cmd == "portfolio":
+        show_banner()
+        cmd_portfolio(engine)
     elif cmd == "live":
         from ui.nexus_live import start
         start()

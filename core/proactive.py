@@ -54,4 +54,16 @@ class ProactiveDaemon:
                 self.on_task_complete(task, result)
 
         if self.engine.config.get("proactive", {}).get("scan_on_start"):
-            pass  # Future: file watchers, git hooks, scheduled checks
+            self._sync_portfolio_prompts()
+
+    def _sync_portfolio_prompts(self) -> None:
+        try:
+            from core.portfolio_bridge import PortfolioBridge
+            bridge = PortfolioBridge(
+                inbox_dir=self.engine.root / "data" / "inbox",
+            )
+            dropped = bridge.sync_from_prompts()
+            for path in dropped:
+                self._log("portfolio_sync", {"file": str(path)})
+        except Exception as e:
+            self._log("portfolio_sync_error", {"error": str(e)})

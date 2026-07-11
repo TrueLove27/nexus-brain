@@ -79,12 +79,33 @@ class NexusEngine:
             self.memory.ensure_conversation()
 
     def health_check(self) -> dict[str, Any]:
+        from core.portfolio_bridge import PortfolioBridge
+
+        inbox = self.root / "data" / "inbox"
+        inbox_pending = len(list(inbox.glob("*.txt"))) if inbox.exists() else 0
+
+        pg_ok = False
+        if self.memory.storage_type == "postgres":
+            try:
+                with self.memory._conn() as conn:
+                    conn.execute("SELECT 1")
+                pg_ok = True
+            except Exception:
+                pg_ok = False
+
+        bridge = PortfolioBridge(inbox_dir=inbox)
+        model_pulled = self.llm.is_available()
+
         return {
-            "ollama": self.llm.is_available(),
+            "ollama": model_pulled,
             "model": self.config["llm"]["model"],
             "agents": len(self.factory.list_all()),
             "storage": self.memory.storage_type,
+            "postgres": pg_ok if self.memory.storage_type == "postgres" else "n/a",
             "memory_db": str(self.memory.db_path),
+            "inbox_queue": inbox_pending,
+            "portfolio_pending": bridge.pending_count(),
+            "portfolio_done": bridge.completed_count(),
         }
 
     def get_session_resume_hint(self) -> str | None:
