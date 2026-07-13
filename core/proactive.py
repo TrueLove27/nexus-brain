@@ -332,11 +332,26 @@ class ProactiveDaemon:
             if n:
                 depth = self._queue.depth()
                 self._log("queue_depth", depth)
+            else:
+                # Idle tick — try consolidating episodic memory into facts/procedures
+                self._maybe_consolidate_idle()
         else:
             self._run_file_inbox(file_goals)
+            if not file_goals:
+                self._maybe_consolidate_idle()
 
         if self.engine.config.get("proactive", {}).get("scan_on_start"):
             self._sync_portfolio_prompts()
+
+    def _maybe_consolidate_idle(self) -> None:
+        if not hasattr(self.engine, "maybe_consolidate"):
+            return
+        try:
+            stats = self.engine.maybe_consolidate(force=False)
+            if stats.get("ran"):
+                self._log("memory_consolidate", stats)
+        except Exception as e:
+            self._log("memory_consolidate_error", {"error": str(e)})
 
     def _sync_portfolio_prompts(self) -> None:
         try:

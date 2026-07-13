@@ -373,16 +373,6 @@ class NexusEngine:
     def list_agents(self) -> list[dict]:
         return self.factory.list_all()
 
-    def maybe_consolidate(self, force: bool = False) -> dict[str, Any]:
-        """Run idle consolidation when episode backlog crosses threshold."""
-        try:
-            stats = self.consolidator.run(force=force)
-            self._last_consolidate_stats = stats
-            return stats
-        except Exception as exc:
-            self._last_consolidate_stats = {"ran": False, "reason": f"error:{exc}"}
-            return self._last_consolidate_stats
-
     def remember(self, content: str, category: str = "general") -> int:
         return self.memory.remember(content, category)
 
