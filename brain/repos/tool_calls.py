@@ -6,6 +6,8 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
+from core.secret_redact import redact_structure, redact_tool_step
+
 
 class ToolCallRepo:
     def __init__(self, conn_factory):
@@ -20,16 +22,17 @@ class ToolCallRepo:
                 action = s.get("action", "unknown")
                 if action in ("finish", "delegate", "create_agent"):
                     continue
+                safe = redact_tool_step(s)
                 conn.execute(
                     """INSERT INTO tool_calls (task_id, job_id, iteration, action, args, result, created_at)
                        VALUES (%s, %s, %s, %s, %s, %s, %s)""",
                     (
                         task_id,
                         job_id,
-                        s.get("iteration", 0),
-                        action,
-                        json.dumps(s.get("args") or {}),
-                        (s.get("result") or "")[:4000],
+                        safe.get("iteration", 0),
+                        safe.get("action", action),
+                        json.dumps(safe.get("args") or {}),
+                        (safe.get("result") or "")[:4000],
                         now,
                     ),
                 )
@@ -45,11 +48,12 @@ class ToolCallRepo:
         now = datetime.now(timezone.utc)
         # Prefer explicit job_id; fall back to payload if callers embed it
         resolved_job = job_id if job_id is not None else payload.get("job_id")
+        safe_payload = redact_structure(payload or {})
         with self._conn() as conn:
             conn.execute(
                 """INSERT INTO agent_events (task_id, job_id, event_type, payload, created_at)
                    VALUES (%s, %s, %s, %s, %s)""",
-                (task_id, resolved_job, event_type, json.dumps(payload), now),
+                (task_id, resolved_job, event_type, json.dumps(safe_payload), now),
             )
             conn.commit()
 

@@ -166,9 +166,12 @@ class JobQueueRepo:
         """
         Persist a ReAct step checkpoint if this runner still owns the fence.
         Survives lease reclaim so a new owner can resume mid-goal.
+        Secrets are redacted at the persistence boundary before JSON write.
         """
+        from core.secret_redact import redact_checkpoint
+
         now = _now()
-        payload = checkpoint if isinstance(checkpoint, dict) else {}
+        payload = redact_checkpoint(checkpoint if isinstance(checkpoint, dict) else {})
         with self._conn() as conn:
             cur = conn.execute(
                 """UPDATE jobs SET checkpoint = %s::jsonb, updated_at = %s

@@ -6,6 +6,8 @@ import json
 from datetime import datetime, timezone
 from typing import Any
 
+from core.secret_redact import redact_structure
+
 
 class JobTraceRepo:
     def __init__(self, conn_factory):
@@ -24,6 +26,7 @@ class JobTraceRepo:
         if not job_id or not event_type:
             return None
         now = datetime.now(timezone.utc)
+        safe_payload = redact_structure(payload or {})
         with self._conn() as conn:
             row = conn.execute(
                 """INSERT INTO job_traces
@@ -36,7 +39,7 @@ class JobTraceRepo:
                     runner_id,
                     task_id,
                     event_type,
-                    json.dumps(payload or {}),
+                    json.dumps(safe_payload),
                     now,
                 ),
             ).fetchone()
