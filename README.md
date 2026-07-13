@@ -80,6 +80,19 @@ py scripts/eval_agents.py --models llama3.2,qwen2.5:7b
 
 Reports are written to `data/evals/` (JSON + Markdown) and a JSON copy under `data/logs/`.
 
+### Memory eval (recall + learning quality)
+Seeds a known fixture of facts / episodes / procedures / learnings (tagged with `eval_run_id`), then probes `recall`, `get_history_context`, tier search, and `get_learnings_for_goal` with natural-language questions. Reports **hit-rate** and a **learning usefulness** check (inject → retrieve).
+
+Always uses an isolated SQLite DB (even when config says Postgres) so production memory is untouched. If Ollama embeddings are down, deterministic hash embeddings keep the ranking path exercised (keyword fallback still applies).
+
+```powershell
+py scripts/eval_memory.py --help
+py scripts/eval_memory.py                              # JSON + Markdown under data/evals/
+py scripts/eval_memory.py --force-hash-embeddings      # offline / no Ollama
+py scripts/eval_memory.py --keep-db                    # retain data/evals/_runs/eval_<id>.db
+py scripts/eval_memory.py --cleanup --eval-run-id <id> # remove tagged rows from a kept DB
+```
+
 ## Architecture
 
 ```

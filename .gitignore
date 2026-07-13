@@ -9,6 +9,7 @@ venv/
 
 # Nexus runtime data (local memory, logs, inbox)
 data/logs/
+data/evals/
 data/inbox/
 data/memory.db
 data/postgres.marker
