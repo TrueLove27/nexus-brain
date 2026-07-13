@@ -76,7 +76,7 @@ class NexusEngine:
             brain_cfg=brain_cfg,
         )
         self.orchestrator = OrchestratorAgent(self.factory, self.memory, root)
-        self.learning = BrainLearning(self.memory, self.llm.chat)
+        self.learning = BrainLearning(self.memory, self.llm.chat, brain_cfg=brain_cfg)
         self.consolidator = MemoryConsolidator(
             self.memory, self.llm.chat, brain_cfg=brain_cfg,
         )
@@ -170,6 +170,13 @@ class NexusEngine:
         bridge = PortfolioBridge.from_engine(self)
         model_pulled = self.llm.is_available()
 
+        kg_stats = {"kg_entities": 0, "kg_relations": 0}
+        if hasattr(self.memory, "knowledge_graph_stats"):
+            try:
+                kg_stats = dict(self.memory.knowledge_graph_stats() or {})
+            except Exception:
+                pass
+
         return {
             "ollama": model_pulled,
             "model": self.config["llm"]["model"],
@@ -178,11 +185,6 @@ class NexusEngine:
             "postgres": pg_ok if self.memory.storage_type == "postgres" else "n/a",
             "pgvector": pgvector_ok if self.memory.storage_type == "postgres" else False,
             "memory_count": memory_count,
-            "memory_tiers": (
-                self.memory.memory_tier_stats()
-                if hasattr(self.memory, "memory_tier_stats")
-                else None
-            ),
             "memory_db": str(self.memory.db_path),
             "inbox_queue": inbox_pending,
             "inbox_retries": inbox_retries,
@@ -201,7 +203,18 @@ class NexusEngine:
             "tool_subprocesses": tool_subprocess_status(),
             "effect_ledger": effect_ledger_status(),
             "memory_tiers": self._memory_tiers_health(),
+            "learning": self._learning_health(),
+            "kg_entities": int(kg_stats.get("kg_entities") or 0),
+            "kg_relations": int(kg_stats.get("kg_relations") or 0),
         }
+
+    def _learning_health(self) -> dict[str, Any]:
+        if hasattr(self.memory, "learning_stats"):
+            try:
+                return dict(self.memory.learning_stats())
+            except Exception as exc:
+                return {"error": str(exc)}
+        return {"active": 0, "avg_confidence": 0.0}
 
     def _memory_tiers_health(self) -> dict[str, Any]:
         stats: dict[str, Any] = {"enabled": False}
@@ -333,7 +346,11 @@ class NexusEngine:
 
         if self.config["brain"].get("learn_from_every_task", True):
             self.learning.learn_from_task(
-                goal, reply, steps, result.get("status") == "done",
+                goal,
+                reply,
+                steps,
+                result.get("status") == "done",
+                task_id=task_id,
             )
             # Idle/post-task consolidation when episode backlog crosses threshold
             try:
@@ -365,6 +382,16 @@ class NexusEngine:
         if hasattr(self.memory, "set_preference"):
             key = preference[:60].strip()
             self.memory.set_preference(key, preference)
+        # Preference-linked knowledge-graph edges (PREFERS)
+        try:
+            from brain.knowledge_graph import KnowledgeGraph
+
+            KnowledgeGraph(self.memory, self.llm.chat).extract_from_text(
+                goal="",
+                preference=preference,
+            )
+        except Exception:
+            pass
 
     def create_agent(self, name: str, role: str, capabilities: list[str] | None = None) -> dict:
         agent = self.factory.create_agent(name, role, capabilities or ["run_command", "read_file", "write_file"])

@@ -74,9 +74,17 @@ class BrainMemory:
                 CREATE TABLE IF NOT EXISTS learnings (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     task_goal TEXT,
+                    task_id INTEGER,
                     outcome TEXT,
                     lesson TEXT NOT NULL,
-                    created_at TEXT NOT NULL
+                    confidence REAL DEFAULT 0.5,
+                    use_count INTEGER DEFAULT 0,
+                    helpful_count INTEGER DEFAULT 0,
+                    embedding TEXT,
+                    superseded_by INTEGER,
+                    status TEXT DEFAULT 'active',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT
                 );
 
                 -- Multi-tier memory (episodic → semantic → procedural)
@@ -128,7 +136,65 @@ class BrainMemory:
                     ON memory_procedures (created_at);
                 CREATE INDEX IF NOT EXISTS idx_mem_procs_category
                     ON memory_procedures (category);
+
+                -- Project / entity knowledge graph
+                CREATE TABLE IF NOT EXISTS kg_entities (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    entity_type TEXT NOT NULL
+                        CHECK (entity_type IN ('project','file','tool','concept','person','repo','other')),
+                    name TEXT NOT NULL,
+                    normalized_name TEXT NOT NULL,
+                    description TEXT,
+                    embedding TEXT,
+                    metadata TEXT DEFAULT '{}',
+                    mention_count INTEGER DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE (entity_type, normalized_name)
+                );
+                CREATE INDEX IF NOT EXISTS idx_kg_entities_normalized
+                    ON kg_entities (normalized_name);
+                CREATE INDEX IF NOT EXISTS idx_kg_entities_type
+                    ON kg_entities (entity_type);
+
+                CREATE TABLE IF NOT EXISTS kg_relations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    from_id INTEGER NOT NULL REFERENCES kg_entities(id) ON DELETE CASCADE,
+                    to_id INTEGER NOT NULL REFERENCES kg_entities(id) ON DELETE CASCADE,
+                    relation_type TEXT NOT NULL,
+                    weight REAL NOT NULL DEFAULT 1.0,
+                    evidence TEXT,
+                    task_id INTEGER,
+                    created_at TEXT NOT NULL,
+                    CHECK (from_id <> to_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_kg_relations_from
+                    ON kg_relations (from_id, relation_type);
+                CREATE INDEX IF NOT EXISTS idx_kg_relations_to
+                    ON kg_relations (to_id, relation_type);
+                CREATE INDEX IF NOT EXISTS idx_kg_relations_type
+                    ON kg_relations (relation_type);
             """)
+            # Validated learning quality columns (idempotent for older DBs)
+            existing = {
+                r[1] for r in conn.execute("PRAGMA table_info(learnings)").fetchall()
+            }
+            alters = [
+                ("task_id", "ALTER TABLE learnings ADD COLUMN task_id INTEGER"),
+                ("confidence", "ALTER TABLE learnings ADD COLUMN confidence REAL DEFAULT 0.5"),
+                ("use_count", "ALTER TABLE learnings ADD COLUMN use_count INTEGER DEFAULT 0"),
+                ("helpful_count", "ALTER TABLE learnings ADD COLUMN helpful_count INTEGER DEFAULT 0"),
+                ("embedding", "ALTER TABLE learnings ADD COLUMN embedding TEXT"),
+                ("superseded_by", "ALTER TABLE learnings ADD COLUMN superseded_by INTEGER"),
+                ("status", "ALTER TABLE learnings ADD COLUMN status TEXT DEFAULT 'active'"),
+                ("updated_at", "ALTER TABLE learnings ADD COLUMN updated_at TEXT"),
+            ]
+            for col, sql in alters:
+                if col not in existing:
+                    try:
+                        conn.execute(sql)
+                    except Exception:
+                        pass
 
     def _embed(self, text: str) -> list[float] | None:
         return embed_text(text, self.embed_model, self.ollama_url)
@@ -412,6 +478,20 @@ class BrainMemory:
             ),
         }
 
+    def knowledge_graph_stats(self) -> dict[str, int]:
+        try:
+            from brain.knowledge_graph import KnowledgeGraph
+            return KnowledgeGraph(self).stats()
+        except Exception:
+            return {"kg_entities": 0, "kg_relations": 0}
+
+    def knowledge_graph_context(self, goal: str) -> str:
+        try:
+            from brain.knowledge_graph import KnowledgeGraph
+            return KnowledgeGraph(self).context_for_goal(goal)
+        except Exception:
+            return ""
+
     def recall(self, query: str, limit: int = 8) -> list[str]:
         query_emb = self._embed(query)
         with self._conn() as conn:
@@ -419,12 +499,19 @@ class BrainMemory:
                 "SELECT id, content, embedding FROM memories ORDER BY created_at DESC LIMIT 200"
             ).fetchall()
 
+        blended: list[str] = []
+        try:
+            from brain.knowledge_graph import KnowledgeGraph
+            blended = KnowledgeGraph(self).blend_descriptions(query, limit=2)
+        except Exception:
+            blended = []
+
         if not rows:
-            return []
+            return blended[:limit]
 
         if query_emb:
             tuples = [(r["id"], r["content"], r["embedding"]) for r in rows]
-            top = rank_by_embedding(query_emb, tuples, limit=limit)
+            top = rank_by_embedding(query_emb, tuples, limit=max(1, limit - len(blended)))
             if top:
                 ids = [t[0] for t in sorted(
                     [(cosine_similarity(query_emb, json.loads(r["embedding"])), r["id"])
@@ -434,9 +521,9 @@ class BrainMemory:
                 with self._conn() as conn:
                     for mid in ids:
                         conn.execute("UPDATE memories SET access_count = access_count + 1 WHERE id = ?", (mid,))
-            return top
+            return (blended + top)[:limit]
 
-        return [row["content"] for row in rows[:limit]]
+        return (blended + [row["content"] for row in rows])[:limit]
 
     def log_task(self, goal: str, agent_id: str = "orchestrator") -> int:
         now = datetime.now(timezone.utc).isoformat()
@@ -478,14 +565,219 @@ class BrainMemory:
             rows = conn.execute("SELECT * FROM agents ORDER BY created_at DESC").fetchall()
         return [dict(r) for r in rows]
 
-    def record_learning(self, task_goal: str, outcome: str, lesson: str) -> None:
+    def record_learning(
+        self,
+        task_goal: str,
+        outcome: str,
+        lesson: str,
+        task_id: int | None = None,
+        embedding: list[float] | None = None,
+        confidence: float = 0.5,
+        status: str = "active",
+    ) -> int:
+        return self.insert_learning(
+            task_goal=task_goal,
+            outcome=outcome,
+            lesson=lesson,
+            task_id=task_id,
+            embedding=embedding,
+            confidence=confidence,
+            status=status,
+            dual_remember=True,
+        )
+
+    def insert_learning(
+        self,
+        *,
+        task_goal: str,
+        outcome: str,
+        lesson: str,
+        task_id: int | None = None,
+        embedding: list[float] | None = None,
+        confidence: float = 0.5,
+        status: str = "active",
+        dual_remember: bool = False,
+    ) -> int:
+        now = datetime.now(timezone.utc).isoformat()
+        emb = embedding if embedding is not None else self._embed(f"{task_goal}\n{lesson}")
+        conf = max(0.0, min(1.0, float(confidence)))
+        status = status if status in ("active", "superseded", "retracted") else "active"
+        with self._conn() as conn:
+            cur = conn.execute(
+                """INSERT INTO learnings
+                   (task_goal, task_id, outcome, lesson, confidence, use_count, helpful_count,
+                    embedding, status, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?)""",
+                (
+                    task_goal,
+                    task_id,
+                    outcome,
+                    lesson,
+                    conf,
+                    json.dumps(emb) if emb else None,
+                    status,
+                    now,
+                    now,
+                ),
+            )
+            lid = cur.lastrowid or 0
+        if dual_remember and lid:
+            self.remember(
+                f"[{outcome}] {lesson}",
+                category="learning",
+                metadata={"goal": task_goal, "task_id": task_id, "learning_id": lid},
+            )
+        return lid
+
+    def merge_learning(
+        self,
+        learning_id: int,
+        *,
+        lesson: str | None = None,
+        confidence: float | None = None,
+        embedding: list[float] | None = None,
+        task_id: int | None = None,
+        outcome: str | None = None,
+    ) -> bool:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._conn() as conn:
+            row = conn.execute("SELECT * FROM learnings WHERE id = ?", (learning_id,)).fetchone()
+            if not row:
+                return False
+            new_lesson = lesson if lesson is not None else row["lesson"]
+            new_conf = (
+                max(0.0, min(1.0, float(confidence)))
+                if confidence is not None
+                else (row["confidence"] if "confidence" in row.keys() else 0.5)
+            )
+            new_emb = json.dumps(embedding) if embedding is not None else row["embedding"]
+            new_task = task_id if task_id is not None else row["task_id"] if "task_id" in row.keys() else None
+            new_outcome = outcome if outcome is not None else row["outcome"]
+            conn.execute(
+                """UPDATE learnings
+                   SET lesson = ?, confidence = ?, embedding = ?, task_id = COALESCE(task_id, ?),
+                       outcome = ?, updated_at = ?
+                   WHERE id = ?""",
+                (new_lesson, new_conf, new_emb, new_task, new_outcome, now, learning_id),
+            )
+        return True
+
+    def supersede_learning(self, old_id: int, new_id: int) -> bool:
         now = datetime.now(timezone.utc).isoformat()
         with self._conn() as conn:
             conn.execute(
-                "INSERT INTO learnings (task_goal, outcome, lesson, created_at) VALUES (?, ?, ?, ?)",
-                (task_goal, outcome, lesson, now),
+                """UPDATE learnings SET status = 'superseded', superseded_by = ?, updated_at = ?
+                   WHERE id = ?""",
+                (new_id, now, old_id),
             )
-        self.remember(f"[{outcome}] {lesson}", category="learning", metadata={"goal": task_goal})
+        return True
+
+    def retract_learning(self, learning_id: int) -> bool:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE learnings SET status = 'retracted', updated_at = ? WHERE id = ?",
+                (now, learning_id),
+            )
+        return True
+
+    def record_learning_outcome(self, learning_id: int, helped: bool) -> bool:
+        now = datetime.now(timezone.utc).isoformat()
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT confidence, helpful_count FROM learnings WHERE id = ?", (learning_id,)
+            ).fetchone()
+            if not row:
+                return False
+            conf = float(row["confidence"] or 0.5)
+            if helped:
+                conn.execute(
+                    """UPDATE learnings
+                       SET helpful_count = COALESCE(helpful_count, 0) + 1,
+                           confidence = ?, updated_at = ?
+                       WHERE id = ?""",
+                    (min(0.98, conf + 0.05), now, learning_id),
+                )
+            else:
+                conn.execute(
+                    """UPDATE learnings SET confidence = ?, updated_at = ? WHERE id = ?""",
+                    (max(0.05, conf - 0.06), now, learning_id),
+                )
+        return True
+
+    def bump_learning_use(self, learning_ids: list[int]) -> None:
+        if not learning_ids:
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        with self._conn() as conn:
+            for lid in learning_ids:
+                conn.execute(
+                    """UPDATE learnings
+                       SET use_count = COALESCE(use_count, 0) + 1, updated_at = ?
+                       WHERE id = ?""",
+                    (now, lid),
+                )
+
+    def list_active_learnings(self, limit: int = 80) -> list[dict[str, Any]]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT id, task_goal, task_id, outcome, lesson, embedding,
+                          confidence, use_count, helpful_count, status, created_at
+                   FROM learnings
+                   WHERE COALESCE(status, 'active') = 'active'
+                   ORDER BY created_at DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def find_similar_learnings(
+        self,
+        lesson: str,
+        *,
+        embedding: list[float] | None = None,
+        limit: int = 12,
+        min_score: float = 0.45,
+    ) -> list[dict[str, Any]]:
+        from brain.learning import text_similarity
+
+        query_emb = embedding if embedding is not None else self._embed(lesson)
+        scored: list[dict[str, Any]] = []
+        for row in self.list_active_learnings(limit=200):
+            sim = 0.0
+            emb = row.get("embedding")
+            if query_emb and emb:
+                if isinstance(emb, str):
+                    try:
+                        emb = json.loads(emb)
+                    except Exception:
+                        emb = None
+                if isinstance(emb, list):
+                    sim = cosine_similarity(query_emb, emb)
+            sim = max(sim, text_similarity(lesson, row.get("lesson") or ""))
+            if sim >= min_score:
+                scored.append({**row, "similarity": sim})
+        scored.sort(key=lambda r: r["similarity"], reverse=True)
+        return scored[:limit]
+
+    def learning_stats(self) -> dict[str, Any]:
+        stats = {"active": 0, "superseded": 0, "retracted": 0, "avg_confidence": 0.0, "total": 0}
+        with self._conn() as conn:
+            rows = conn.execute(
+                """SELECT COALESCE(status, 'active') AS status, COUNT(*) AS c,
+                          AVG(COALESCE(confidence, 0.5)) AS avg_conf
+                   FROM learnings GROUP BY COALESCE(status, 'active')"""
+            ).fetchall()
+            total = 0
+            for r in rows:
+                st = r["status"] or "active"
+                c = int(r["c"] or 0)
+                total += c
+                if st in stats:
+                    stats[st] = c
+                if st == "active" and r["avg_conf"] is not None:
+                    stats["avg_confidence"] = round(float(r["avg_conf"]), 3)
+            stats["total"] = total
+        return stats
 
     def get_recent_tasks(self, limit: int = 15) -> list[dict[str, Any]]:
         with self._conn() as conn:
@@ -513,21 +805,26 @@ class BrainMemory:
         return [s[1] for s in scored[:limit]]
 
     def get_learnings_for_goal(self, goal: str, limit: int = 5) -> list[dict[str, Any]]:
-        recalled = self.recall(goal, limit=limit)
-        with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT task_goal, outcome, lesson, created_at FROM learnings ORDER BY created_at DESC LIMIT 100"
-            ).fetchall()
-        matches = []
-        goal_lower = goal.lower()
-        for row in rows:
-            tg = (row["task_goal"] or "").lower()
-            lesson = row["lesson"]
-            if tg and any(w in tg for w in goal_lower.split() if len(w) > 3):
-                matches.append(dict(row))
-            elif lesson in recalled:
-                matches.append(dict(row))
-        return matches[:limit]
+        """Embedding-ranked active lessons; bumps use_count when injected."""
+        query_emb = self._embed(goal)
+        matches = self.find_similar_learnings(
+            goal, embedding=query_emb, limit=limit, min_score=0.35
+        )
+        if not matches:
+            goal_lower = goal.lower()
+            words = [w for w in goal_lower.split() if len(w) > 3]
+            for row in self.list_active_learnings(limit=100):
+                tg = (row.get("task_goal") or "").lower()
+                lesson = (row.get("lesson") or "").lower()
+                if words and (any(w in tg for w in words) or any(w in lesson for w in words)):
+                    matches.append({**row, "similarity": 0.4})
+                if len(matches) >= limit:
+                    break
+        matches = matches[:limit]
+        ids = [int(m["id"]) for m in matches if m.get("id") is not None]
+        if ids:
+            self.bump_learning_use(ids)
+        return matches
 
     def get_history_context(self, goal: str) -> str:
         """Formatted history so agents avoid repeating past mistakes."""
@@ -549,7 +846,9 @@ class BrainMemory:
         if learnings:
             parts.append("\n## Lessons from similar tasks")
             for l in learnings:
-                parts.append(f"- [{l['outcome']}] {l['lesson'][:200]}")
+                conf = l.get("confidence")
+                conf_s = f" conf={float(conf):.2f}" if conf is not None else ""
+                parts.append(f"- [{l.get('outcome', '?')}{conf_s}] {str(l.get('lesson') or '')[:200]}")
 
         semantic = self.recall(goal, limit=5)
         if semantic:
@@ -584,6 +883,10 @@ class BrainMemory:
                         parts.append(format_episode_line(e))
             except Exception:
                 pass
+
+        kg_ctx = self.knowledge_graph_context(goal)
+        if kg_ctx:
+            parts.append("\n" + kg_ctx)
 
         return "\n".join(parts)
 

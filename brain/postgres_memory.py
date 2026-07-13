@@ -25,6 +25,7 @@ from brain.memory_tiers import (
     normalize_source,
 )
 from brain.repos.conversations import ConversationRepo
+from brain.repos.entities import EntitiesRepo
 from brain.repos.job_queue import JobQueueRepo
 from brain.repos.job_traces import JobTraceRepo
 from brain.repos.memory_tiers import MemoryTiersRepo
@@ -71,6 +72,7 @@ class PostgresMemory:
         self.job_queue = JobQueueRepo(self._conn)
         self.job_traces = JobTraceRepo(self._conn)
         self.memory_tiers = MemoryTiersRepo(self._conn, embed_fn=self._embed)
+        self.entities = EntitiesRepo(self._conn, embed_fn=self._embed)
         self._conversation_id: int | None = None
         self._bind_effect_ledger()
 
@@ -414,6 +416,20 @@ class PostgresMemory:
         stats["pgvector"] = bool(self._pgvector)
         return stats
 
+    def knowledge_graph_stats(self) -> dict[str, int]:
+        try:
+            return self.entities.stats()
+        except Exception:
+            return {"kg_entities": 0, "kg_relations": 0}
+
+    def knowledge_graph_context(self, goal: str) -> str:
+        try:
+            from brain.knowledge_graph import KnowledgeGraph
+            return KnowledgeGraph(self).context_for_goal(goal)
+        except Exception as exc:
+            log.debug("kg context skipped: %s", exc)
+            return ""
+
     def recall(
         self,
         query: str,
@@ -424,15 +440,25 @@ class PostgresMemory:
         limit = limit if limit is not None else self.max_context_memories
         query_emb = self._embed(query)
 
+        blended: list[str] = []
+        try:
+            from brain.knowledge_graph import KnowledgeGraph
+            blended = KnowledgeGraph(self).blend_descriptions(query, limit=2)
+        except Exception:
+            blended = []
+
+        mem_limit = max(1, limit - len(blended)) if blended else limit
+
         if query_emb and self._pgvector:
             try:
-                hits = self._hybrid_recall(query, query_emb, limit=limit, category=category)
+                hits = self._hybrid_recall(query, query_emb, limit=mem_limit, category=category)
                 if hits:
-                    return hits
+                    return (blended + hits)[:limit]
             except Exception as exc:
                 log.warning("hybrid recall failed, falling back: %s", exc)
 
-        return self._fallback_recall(query_emb, limit=limit, category=category)
+        fallback = self._fallback_recall(query_emb, limit=mem_limit, category=category)
+        return (blended + fallback)[:limit]
 
     def _hybrid_recall(
         self,
@@ -662,7 +688,7 @@ class PostgresMemory:
                 )
                 updated += 1
 
-            for table in ("memory_facts", "memory_episodes", "memory_procedures"):
+            for table in ("memory_facts", "memory_episodes", "memory_procedures", "learnings"):
                 if not self._table_exists(table):
                     continue
                 try:
@@ -750,15 +776,376 @@ class PostgresMemory:
             rows = conn.execute("SELECT * FROM agents ORDER BY created_at DESC").fetchall()
         return [dict(r) for r in rows]
 
-    def record_learning(self, task_goal: str, outcome: str, lesson: str) -> None:
+    def record_learning(
+        self,
+        task_goal: str,
+        outcome: str,
+        lesson: str,
+        task_id: int | None = None,
+        embedding: list[float] | None = None,
+        confidence: float = 0.5,
+        status: str = "active",
+    ) -> int:
+        """Legacy-compatible insert. Prefer insert_learning from the validated loop."""
+        return self.insert_learning(
+            task_goal=task_goal,
+            outcome=outcome,
+            lesson=lesson,
+            task_id=task_id,
+            embedding=embedding,
+            confidence=confidence,
+            status=status,
+            dual_remember=True,
+        )
+
+    def insert_learning(
+        self,
+        *,
+        task_goal: str,
+        outcome: str,
+        lesson: str,
+        task_id: int | None = None,
+        embedding: list[float] | None = None,
+        confidence: float = 0.5,
+        status: str = "active",
+        dual_remember: bool = False,
+    ) -> int:
+        """Insert an active (or other status) learning with optional embedding + task_id."""
         now = datetime.now(timezone.utc)
+        emb = embedding if embedding is not None else self._embed(f"{task_goal}\n{lesson}")
+        vec = embedding_to_pgvector(emb) if emb else None
+        conf = max(0.0, min(1.0, float(confidence)))
+        status = status if status in ("active", "superseded", "retracted") else "active"
+
         with self._conn() as conn:
+            cols = self._columns("learnings")
+            has_quality = "confidence" in cols
+            has_vec = "embedding_vec" in cols and self._pgvector and vec
+
+            if has_quality and has_vec:
+                row = conn.execute(
+                    """INSERT INTO learnings
+                       (task_goal, task_id, outcome, lesson, confidence, use_count, helpful_count,
+                        embedding, embedding_vec, status, created_at, updated_at)
+                       VALUES (%s, %s, %s, %s, %s, 0, 0, %s, %s::vector, %s, %s, %s)
+                       RETURNING id""",
+                    (
+                        task_goal,
+                        task_id,
+                        outcome,
+                        lesson,
+                        conf,
+                        json.dumps(emb) if emb else None,
+                        vec,
+                        status,
+                        now,
+                        now,
+                    ),
+                ).fetchone()
+            elif has_quality:
+                row = conn.execute(
+                    """INSERT INTO learnings
+                       (task_goal, task_id, outcome, lesson, confidence, use_count, helpful_count,
+                        embedding, status, created_at, updated_at)
+                       VALUES (%s, %s, %s, %s, %s, 0, 0, %s, %s, %s, %s)
+                       RETURNING id""",
+                    (
+                        task_goal,
+                        task_id,
+                        outcome,
+                        lesson,
+                        conf,
+                        json.dumps(emb) if emb else None,
+                        status,
+                        now,
+                        now,
+                    ),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    """INSERT INTO learnings (task_goal, task_id, outcome, lesson, created_at)
+                       VALUES (%s, %s, %s, %s, %s) RETURNING id""",
+                    (task_goal, task_id, outcome, lesson, now),
+                ).fetchone()
+            conn.commit()
+            lid = int(row["id"]) if row else 0
+
+        if dual_remember and lid:
+            try:
+                self.remember(
+                    f"[{outcome}] {lesson}",
+                    category="learning",
+                    metadata={"goal": task_goal, "task_id": task_id, "learning_id": lid},
+                )
+            except Exception:
+                pass
+        return lid
+
+    def merge_learning(
+        self,
+        learning_id: int,
+        *,
+        lesson: str | None = None,
+        confidence: float | None = None,
+        embedding: list[float] | None = None,
+        task_id: int | None = None,
+        outcome: str | None = None,
+    ) -> bool:
+        """Bump confidence / refresh text on a corroborated duplicate."""
+        now = datetime.now(timezone.utc)
+        vec = embedding_to_pgvector(embedding) if embedding else None
+        with self._conn() as conn:
+            cols = self._columns("learnings")
+            sets = ["updated_at = %s"]
+            params: list[Any] = [now]
+            if lesson is not None:
+                sets.append("lesson = %s")
+                params.append(lesson)
+            if confidence is not None and "confidence" in cols:
+                sets.append("confidence = %s")
+                params.append(max(0.0, min(1.0, float(confidence))))
+            if embedding is not None and "embedding" in cols:
+                sets.append("embedding = %s")
+                params.append(json.dumps(embedding))
+            if vec and "embedding_vec" in cols and self._pgvector:
+                sets.append("embedding_vec = %s::vector")
+                params.append(vec)
+            if task_id is not None:
+                sets.append("task_id = COALESCE(task_id, %s)")
+                params.append(task_id)
+            if outcome is not None:
+                sets.append("outcome = %s")
+                params.append(outcome)
+            if "use_count" in cols:
+                sets.append("use_count = COALESCE(use_count, 0)")
+            params.append(learning_id)
             conn.execute(
-                "INSERT INTO learnings (task_goal, outcome, lesson, created_at) VALUES (%s, %s, %s, %s)",
-                (task_goal, outcome, lesson, now),
+                f"UPDATE learnings SET {', '.join(sets)} WHERE id = %s",
+                params,
             )
             conn.commit()
-        self.remember(f"[{outcome}] {lesson}", category="learning", metadata={"goal": task_goal})
+        return True
+
+    def supersede_learning(self, old_id: int, new_id: int) -> bool:
+        """Mark old learning superseded by new_id (status + superseded_by link)."""
+        now = datetime.now(timezone.utc)
+        with self._conn() as conn:
+            cols = self._columns("learnings")
+            if "status" in cols and "superseded_by" in cols:
+                conn.execute(
+                    """UPDATE learnings
+                       SET status = 'superseded', superseded_by = %s, updated_at = %s
+                       WHERE id = %s""",
+                    (new_id, now, old_id),
+                )
+            elif "superseded_by" in cols:
+                conn.execute(
+                    "UPDATE learnings SET superseded_by = %s WHERE id = %s",
+                    (new_id, old_id),
+                )
+            conn.commit()
+        return True
+
+    def retract_learning(self, learning_id: int) -> bool:
+        now = datetime.now(timezone.utc)
+        with self._conn() as conn:
+            cols = self._columns("learnings")
+            if "status" in cols:
+                conn.execute(
+                    """UPDATE learnings SET status = 'retracted', updated_at = %s
+                       WHERE id = %s""",
+                    (now, learning_id),
+                )
+            conn.commit()
+        return True
+
+    def record_learning_outcome(self, learning_id: int, helped: bool) -> bool:
+        """Feedback when an injected lesson helped (or not)."""
+        now = datetime.now(timezone.utc)
+        with self._conn() as conn:
+            cols = self._columns("learnings")
+            if "helpful_count" not in cols:
+                return False
+            if helped:
+                conn.execute(
+                    """UPDATE learnings
+                       SET helpful_count = COALESCE(helpful_count, 0) + 1,
+                           confidence = LEAST(0.98, COALESCE(confidence, 0.5) + 0.05),
+                           updated_at = %s
+                       WHERE id = %s""",
+                    (now, learning_id),
+                )
+            else:
+                conn.execute(
+                    """UPDATE learnings
+                       SET confidence = GREATEST(0.05, COALESCE(confidence, 0.5) - 0.06),
+                           updated_at = %s
+                       WHERE id = %s""",
+                    (now, learning_id),
+                )
+            conn.commit()
+        return True
+
+    def bump_learning_use(self, learning_ids: list[int]) -> None:
+        if not learning_ids:
+            return
+        with self._conn() as conn:
+            cols = self._columns("learnings")
+            if "use_count" not in cols:
+                return
+            conn.execute(
+                """UPDATE learnings
+                   SET use_count = COALESCE(use_count, 0) + 1, updated_at = NOW()
+                   WHERE id = ANY(%s)""",
+                (list(learning_ids),),
+            )
+            conn.commit()
+
+    def list_active_learnings(self, limit: int = 80) -> list[dict[str, Any]]:
+        with self._conn() as conn:
+            cols = self._columns("learnings")
+            status_filter = "WHERE status = 'active'" if "status" in cols else ""
+            if "superseded_by" in cols and "status" not in cols:
+                status_filter = "WHERE superseded_by IS NULL"
+            rows = conn.execute(
+                f"""SELECT id, task_goal, task_id, outcome, lesson, embedding,
+                           created_at
+                           {', confidence' if 'confidence' in cols else ''}
+                           {', use_count' if 'use_count' in cols else ''}
+                           {', helpful_count' if 'helpful_count' in cols else ''}
+                           {', status' if 'status' in cols else ''}
+                    FROM learnings {status_filter}
+                    ORDER BY created_at DESC LIMIT %s""",
+                (limit,),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def find_similar_learnings(
+        self,
+        lesson: str,
+        *,
+        embedding: list[float] | None = None,
+        limit: int = 12,
+        min_score: float = 0.45,
+    ) -> list[dict[str, Any]]:
+        """Find active near-duplicates by hybrid vector+text or JSONB cosine."""
+        query_emb = embedding if embedding is not None else self._embed(lesson)
+        if query_emb and self._pgvector:
+            try:
+                hits = self._hybrid_learning_search(lesson, query_emb, limit=limit)
+                if hits:
+                    return [h for h in hits if float(h.get("similarity") or 0) >= min_score]
+            except Exception as exc:
+                log.warning("hybrid learning search failed: %s", exc)
+
+        # JSONB / text fallback over active rows
+        rows = self.list_active_learnings(limit=200)
+        scored: list[dict[str, Any]] = []
+        from brain.learning import text_similarity
+
+        for row in rows:
+            sim = 0.0
+            emb = row.get("embedding")
+            if query_emb and emb:
+                if isinstance(emb, str):
+                    try:
+                        emb = json.loads(emb)
+                    except Exception:
+                        emb = None
+                if isinstance(emb, list):
+                    sim = cosine_similarity(query_emb, emb)
+            sim = max(sim, text_similarity(lesson, row.get("lesson") or ""))
+            if sim >= min_score:
+                scored.append({**row, "similarity": sim})
+        scored.sort(key=lambda r: r["similarity"], reverse=True)
+        return scored[:limit]
+
+    def _hybrid_learning_search(
+        self,
+        query: str,
+        query_emb: list[float],
+        *,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        vec = embedding_to_pgvector(query_emb)
+        if not vec:
+            return []
+        with self._conn() as conn:
+            cols = self._columns("learnings")
+            if "embedding_vec" not in cols:
+                return []
+            conf_term = "0.15 * COALESCE(confidence, 0.5)" if "confidence" in cols else "0.15"
+            use_term = (
+                "0.10 * LN(1 + COALESCE(use_count, 0))" if "use_count" in cols else "0.10"
+            )
+            rows = conn.execute(
+                f"""
+                SELECT id, task_goal, task_id, outcome, lesson, embedding,
+                       created_at,
+                       COALESCE(confidence, 0.5) AS confidence,
+                       COALESCE(use_count, 0) AS use_count,
+                       COALESCE(helpful_count, 0) AS helpful_count,
+                       status,
+                       (1.0 - (embedding_vec <=> %s::vector)) AS similarity,
+                       (0.55 * (1.0 - (embedding_vec <=> %s::vector))
+                        + 0.20 * COALESCE(ts_rank(content_tsv, plainto_tsquery('english', %s)), 0)
+                        + {conf_term}
+                        + {use_term}
+                       ) AS score
+                FROM learnings
+                WHERE status = 'active' AND embedding_vec IS NOT NULL
+                ORDER BY score DESC
+                LIMIT %s
+                """,
+                (vec, vec, query, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def learning_stats(self) -> dict[str, Any]:
+        """Counts for health_check: active, superseded, avg confidence."""
+        stats: dict[str, Any] = {
+            "active": 0,
+            "superseded": 0,
+            "retracted": 0,
+            "avg_confidence": 0.0,
+            "total": 0,
+        }
+        try:
+            with self._conn() as conn:
+                cols = self._columns("learnings")
+                if "status" not in cols:
+                    row = conn.execute("SELECT COUNT(*) AS c FROM learnings").fetchone()
+                    stats["active"] = int(row["c"] if row else 0)
+                    stats["total"] = stats["active"]
+                    return stats
+                rows = conn.execute(
+                    """SELECT status, COUNT(*) AS c,
+                              AVG(confidence) AS avg_conf
+                       FROM learnings
+                       GROUP BY status"""
+                ).fetchall()
+                total = 0
+                active_conf = None
+                for r in rows:
+                    st = r["status"] or "active"
+                    c = int(r["c"] or 0)
+                    total += c
+                    if st in stats:
+                        stats[st] = c
+                    if st == "active" and r.get("avg_conf") is not None:
+                        active_conf = float(r["avg_conf"])
+                stats["total"] = total
+                if active_conf is not None:
+                    stats["avg_confidence"] = round(active_conf, 3)
+                else:
+                    row = conn.execute(
+                        "SELECT AVG(confidence) AS a FROM learnings WHERE status = 'active'"
+                    ).fetchone()
+                    if row and row.get("a") is not None:
+                        stats["avg_confidence"] = round(float(row["a"]), 3)
+        except Exception as exc:
+            log.debug("learning_stats failed: %s", exc)
+        return stats
 
     def get_recent_tasks(self, limit: int = 15) -> list[dict[str, Any]]:
         return self.tasks.get_recent(limit)
@@ -767,21 +1154,48 @@ class PostgresMemory:
         return self.tasks.get_failed_similar(goal, limit)
 
     def get_learnings_for_goal(self, goal: str, limit: int = 5) -> list[dict[str, Any]]:
-        recalled = self.recall(goal, limit=limit)
-        with self._conn() as conn:
-            rows = conn.execute(
-                "SELECT task_goal, outcome, lesson, created_at FROM learnings ORDER BY created_at DESC LIMIT 100"
-            ).fetchall()
-        matches = []
-        goal_lower = goal.lower()
-        for row in rows:
-            tg = (row["task_goal"] or "").lower()
-            lesson = row["lesson"]
-            if tg and any(w in tg for w in goal_lower.split() if len(w) > 3):
-                matches.append(dict(row))
-            elif lesson in recalled:
-                matches.append(dict(row))
-        return matches[:limit]
+        """Hybrid embedding retrieval of active lessons; bumps use_count on inject."""
+        query_emb = self._embed(goal)
+        matches: list[dict[str, Any]] = []
+
+        if query_emb and self._pgvector:
+            try:
+                matches = self._hybrid_learning_search(goal, query_emb, limit=limit)
+            except Exception as exc:
+                log.warning("get_learnings_for_goal hybrid failed: %s", exc)
+                matches = []
+
+        if not matches:
+            # Fallback: similar by lesson embedding / keyword against goal
+            try:
+                matches = self.find_similar_learnings(
+                    goal, embedding=query_emb, limit=limit, min_score=0.35
+                )
+            except Exception:
+                matches = []
+
+        if not matches:
+            # Keyword fallback over active rows
+            goal_lower = goal.lower()
+            words = [w for w in goal_lower.split() if len(w) > 3]
+            for row in self.list_active_learnings(limit=100):
+                tg = (row.get("task_goal") or "").lower()
+                lesson = (row.get("lesson") or "").lower()
+                if words and (
+                    any(w in tg for w in words) or any(w in lesson for w in words)
+                ):
+                    matches.append({**row, "similarity": 0.4})
+                if len(matches) >= limit:
+                    break
+
+        matches = matches[:limit]
+        ids = [int(m["id"]) for m in matches if m.get("id") is not None]
+        if ids:
+            try:
+                self.bump_learning_use(ids)
+            except Exception:
+                pass
+        return matches
 
     def get_history_context(self, goal: str) -> str:
         parts: list[str] = []
@@ -813,7 +1227,9 @@ class PostgresMemory:
         if learnings:
             parts.append("\n## Lessons from similar tasks")
             for l in learnings:
-                parts.append(f"- [{l['outcome']}] {l['lesson'][:200]}")
+                conf = l.get("confidence")
+                conf_s = f" conf={float(conf):.2f}" if conf is not None else ""
+                parts.append(f"- [{l.get('outcome', '?')}{conf_s}] {str(l.get('lesson') or '')[:200]}")
 
         semantic = self.recall(goal, limit=mem_limit)
         if semantic:
@@ -848,6 +1264,10 @@ class PostgresMemory:
                         parts.append(format_episode_line(e))
             except Exception as exc:
                 log.debug("tier context skipped: %s", exc)
+
+        kg_ctx = self.knowledge_graph_context(goal)
+        if kg_ctx:
+            parts.append("\n" + kg_ctx)
 
         return "\n".join(parts)
 

@@ -132,6 +132,62 @@ py main.py health                               # shows pgvector: true/false + m
 
 `brain.max_context_memories` in `config/brain.yaml` caps how many memories enter agent context.
 
+## Validated learning
+
+After every task (when `brain.learn_from_every_task` is true), Nexus runs a **validated learning loop** instead of blindly inserting a new row:
+
+1. **Extract** — LLM writes one concise lesson from the goal, result, and steps
+2. **Embed** — lesson is embedded (`nomic-embed-text` → 768-d) and stored as JSONB + optional `embedding_vec`
+3. **Dedupe / merge** — active lessons with cosine (or text) similarity ≥ ~0.88 are merged: confidence bumps, text coalesced, `task_id` filled in
+4. **Contradiction** — high-similarity lessons with the opposite outcome are LLM/heuristic-checked; the old row becomes `superseded` with `superseded_by` pointing at the new lesson
+5. **Episodic dual-write** — also recorded via `record_episode` / `remember(..., category="learning")` for multi-tier consolidation
+6. **Retrieval** — `get_learnings_for_goal` ranks active lessons with hybrid vector+keyword+confidence+use (pgvector) or embedding cosine (SQLite), and bumps `use_count` when injected into agent context
+
+Optional feedback: `engine.learning.record_learning_outcome(learning_id, helped=True)` increments `helpful_count` and adjusts confidence.
+
+```powershell
+py main.py health   # shows learning.active / avg_confidence / superseded
+```
+
+Schema: migration `012_learning_quality.sql` (`confidence`, `use_count`, `helpful_count`, `embedding`, `embedding_vec`, `superseded_by`, `status`, `updated_at`). Thresholds live under `brain.learning` in `config/brain.yaml`.
+
+## Knowledge graph
+
+Nexus builds a **project/entity graph** from completed tasks and `teach()` preferences:
+
+| Table | Role |
+|-------|------|
+| `kg_entities` | Nodes: `project`, `file`, `tool`, `concept`, `person`, `repo`, `other` (unique on type + normalized name) |
+| `kg_relations` | Weighted edges: `USED_TOOL`, `FAILED_ON`, `LEARNED_FROM`, `PREFERS`, `TOUCHES`, `PART_OF`, … |
+
+**Extraction:** After each task, `BrainLearning` asks the LLM for JSON entities + relations and upserts them (`brain/knowledge_graph.py`). `teach()` adds `PREFERS` edges from a `user` person node.
+
+**Context:** `get_history_context(goal)` appends a **Knowledge graph** section — entities mentioned in the goal plus a 1-hop neighborhood (tools used, failures, related files/projects). `recall()` also blends short entity descriptions into results.
+
+**Health:** `py main.py health` reports `kg_entities` and `kg_relations` counts.
+
+Example questions this unlocks:
+
+- “What tools failed last time we touched *nexus-brain*?”
+- “Which files are related to the job queue work?”
+- “What does the user prefer about committing / pushing?”
+- “What projects use `pgvector` / `PostgresMemory`?”
+
+Neighborhood API shape (also returned by `KnowledgeGraph.neighborhood`):
+
+```python
+{
+  "entity": {"id": 3, "entity_type": "project", "name": "nexus-brain", "description": "...", ...},
+  "relations": [
+    {"id": 12, "from_id": 3, "to_id": 7, "relation_type": "USED_TOOL", "weight": 2.0, "evidence": "...", "task_id": 41}
+  ],
+  "neighbors": [
+    {"id": 7, "entity_type": "tool", "name": "shell", "description": "...", ...}
+  ],
+  "matches": [...]  # when lookup was by free-text query
+}
+```
+
 ## Agents
 
 | Agent | Does |
