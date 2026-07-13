@@ -69,6 +69,17 @@ py main.py teach "When coding, always add error handling"
 
 Preferences are saved to `data/user_preferences.md` and injected into every agent's brain.
 
+### Agent eval (model benchmark)
+Run a small fixed set of synthetic goals through `NexusEngine` and compare completion rate (`status == done`), duration, and step counts across Ollama models:
+
+```powershell
+py scripts/eval_agents.py --help
+py scripts/eval_agents.py                              # default model from config/brain.yaml
+py scripts/eval_agents.py --models llama3.2,qwen2.5:7b
+```
+
+Reports are written to `data/evals/` (JSON + Markdown) and a JSON copy under `data/logs/`.
+
 ## Architecture
 
 ```
