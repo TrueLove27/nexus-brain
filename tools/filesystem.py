@@ -10,8 +10,20 @@ def register_filesystem_tools(registry: ToolRegistry) -> None:
     ws = registry.workspace
     events = EventBus.get()
 
+    def _resolve(path: str) -> Path | str:
+        """Resolve path; return error string if sandbox denies it."""
+        policy = getattr(registry, "policy", None)
+        if policy is not None and policy.enabled:
+            denied = policy.check_path(path, ws)
+            if denied:
+                return f"Error: {denied}"
+            return policy.resolve_path(path, ws)
+        return Path(path) if Path(path).is_absolute() else ws / path
+
     def read_file(path: str, max_lines: int = 500) -> str:
-        p = Path(path) if Path(path).is_absolute() else ws / path
+        p = _resolve(path)
+        if isinstance(p, str):
+            return p
         if not p.exists():
             return f"Error: file not found: {p}"
         lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -20,7 +32,9 @@ def register_filesystem_tools(registry: ToolRegistry) -> None:
         return "\n".join(lines)
 
     def write_file(path: str, content: str) -> str:
-        p = Path(path) if Path(path).is_absolute() else ws / path
+        p = _resolve(path)
+        if isinstance(p, str):
+            return p
         p.parent.mkdir(parents=True, exist_ok=True)
         events.emit("code_write_start", {"path": str(p), "length": len(content)})
         snippet = content[-500:] if len(content) > 500 else content
@@ -30,7 +44,9 @@ def register_filesystem_tools(registry: ToolRegistry) -> None:
         return f"Wrote {len(content)} chars to {p}"
 
     def edit_file(path: str, old_text: str, new_text: str) -> str:
-        p = Path(path) if Path(path).is_absolute() else ws / path
+        p = _resolve(path)
+        if isinstance(p, str):
+            return p
         if not p.exists():
             return f"Error: file not found: {p}"
         content = p.read_text(encoding="utf-8", errors="replace")
@@ -42,7 +58,9 @@ def register_filesystem_tools(registry: ToolRegistry) -> None:
         return f"Edited {p}"
 
     def list_dir(path: str = ".", max_entries: int = 100) -> str:
-        p = Path(path) if Path(path).is_absolute() else ws / path
+        p = _resolve(path)
+        if isinstance(p, str):
+            return p
         if not p.exists():
             return f"Error: directory not found: {p}"
         entries = sorted(p.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower()))
@@ -55,7 +73,9 @@ def register_filesystem_tools(registry: ToolRegistry) -> None:
         return "\n".join(lines)
 
     def search_files(pattern: str, directory: str = ".", max_results: int = 30) -> str:
-        p = Path(directory) if Path(directory).is_absolute() else ws / directory
+        p = _resolve(directory)
+        if isinstance(p, str):
+            return p
         matches = []
         for f in p.rglob(pattern):
             if f.is_file():

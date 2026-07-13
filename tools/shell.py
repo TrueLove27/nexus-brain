@@ -10,6 +10,17 @@ def register_shell_tools(registry: ToolRegistry) -> None:
     events = EventBus.get()
 
     def run_command(command: str, cwd: str = "") -> str:
+        # Policy gate also runs in ToolRegistry.execute; re-check for direct callers.
+        policy = getattr(registry, "policy", None)
+        if policy is not None and policy.enabled:
+            denied = policy.check_shell_command(command)
+            if denied:
+                return f"Error: {denied}"
+            if cwd:
+                path_denied = policy.check_path(cwd, registry.workspace)
+                if path_denied:
+                    return f"Error: {path_denied}"
+
         work_dir = cwd if cwd else None
         events.emit("terminal_start", {"command": command, "cwd": work_dir or str(registry.workspace)})
         proc = subprocess.Popen(

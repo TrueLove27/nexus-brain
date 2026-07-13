@@ -8,9 +8,20 @@ from .registry import ToolRegistry
 def register_code_tools(registry: ToolRegistry) -> None:
     ws = registry.workspace
 
+    def _resolve(path: str) -> Path | str:
+        policy = getattr(registry, "policy", None)
+        if policy is not None and policy.enabled:
+            denied = policy.check_path(path, ws)
+            if denied:
+                return f"Error: {denied}"
+            return policy.resolve_path(path, ws)
+        return Path(path) if Path(path).is_absolute() else ws / path
+
     def search_code(query: str, directory: str = ".", file_pattern: str = "*.*",
                     max_results: int = 25) -> str:
-        p = Path(directory) if Path(directory).is_absolute() else ws / directory
+        p = _resolve(directory)
+        if isinstance(p, str):
+            return p
         matches = []
         for f in p.rglob(file_pattern):
             if not f.is_file() or f.suffix in {".exe", ".dll", ".png", ".jpg", ".zip"}:
@@ -30,7 +41,17 @@ def register_code_tools(registry: ToolRegistry) -> None:
         return "\n".join(matches) if matches else f"No matches for '{query}'"
 
     def create_project(name: str, project_type: str = "python", path: str = "") -> str:
-        base = Path(path) if path else ws / name
+        if path:
+            base = _resolve(path)
+            if isinstance(base, str):
+                return base
+        else:
+            base = ws / name
+            policy = getattr(registry, "policy", None)
+            if policy is not None and policy.enabled:
+                denied = policy.check_path(base, ws)
+                if denied:
+                    return f"Error: {denied}"
         base.mkdir(parents=True, exist_ok=True)
         if project_type == "python":
             (base / "main.py").write_text('def main():\n    print("Hello")\n\nif __name__ == "__main__":\n    main()\n')

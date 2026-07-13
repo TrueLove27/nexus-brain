@@ -16,6 +16,8 @@ from llm.ollama import OllamaProvider
 from tools.registry import ToolRegistry
 from core.events import EventBus
 from core.job_context import get_job_id, job_scope
+from core.job_queue import default_runner_id
+from core.tool_policy import PolicyGuardedLLM, ToolPolicy
 
 
 class NexusEngine:
@@ -31,11 +33,18 @@ class NexusEngine:
         brain_cfg = self.config["brain"]
 
         self.root = root
-        self.llm = OllamaProvider(
+        self.runner_id = default_runner_id()
+        self.tool_policy = ToolPolicy.from_config(
+            self.config,
+            workspace=paths["workspace"],
+            runner_id=self.runner_id,
+        )
+        raw_llm = OllamaProvider(
             model=llm_cfg["model"],
             base_url=llm_cfg["base_url"],
             max_tokens=llm_cfg.get("max_tokens", 4096),
         )
+        self.llm = PolicyGuardedLLM(raw_llm, self.tool_policy)
 
         data_dir = root / brain_cfg["data_dir"]
         data_dir.mkdir(parents=True, exist_ok=True)
@@ -49,7 +58,7 @@ class NexusEngine:
             workspace=paths["workspace"],
             user_notes_path=data_dir / "user_preferences.md",
         )
-        self.tools = ToolRegistry(paths["workspace"])
+        self.tools = ToolRegistry(paths["workspace"], policy=self.tool_policy)
         self.factory = AgentFactory(
             root / "config" / "agents.yaml",
             self.memory, self.personality, self.llm, self.tools,
@@ -149,6 +158,7 @@ class NexusEngine:
             "job_recent_failures": job_traces.get("recent_failures") or [],
             "portfolio_pending": bridge.pending_count(),
             "portfolio_done": bridge.completed_count(),
+            "tool_sandbox": self.tool_policy.status(self.runner_id),
         }
 
     def runtime_status(self, *, include_health: bool = True) -> dict[str, Any]:
@@ -167,7 +177,7 @@ class NexusEngine:
 
     def run(self, goal: str, *, job_id: int | None = None, job_attempt: int = 1) -> dict[str, Any]:
         """Execute a goal. When job_id is set, tool_calls/agent_events link to that durable job."""
-        with job_scope(job_id):
+        with job_scope(job_id, runner_id=self.runner_id):
             return self._run_inner(goal, job_id=job_id, job_attempt=job_attempt)
 
     def _run_inner(

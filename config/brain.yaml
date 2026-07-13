@@ -51,3 +51,20 @@ proactive:
     max_attempts: 4          # total runs before data/inbox/failed/
     base_delay_seconds: 30   # 30s → 60s → 120s → …
     backoff_multiplier: 2
+
+# Tool execution sandbox — confinement + shell policy + per-runner rate limits
+tool_policy:
+  enabled: true
+  # Empty allowed_roots → workspace + portfolio.engine_root
+  allowed_roots:
+    - C:\Users\cheki\nexus-brain
+    - C:\Users\cheki\Desktop\New folder (2)\portfolio-growth-engine
+  shell:
+    mode: blocklist          # blocklist | allowlist (blocklist fits flexible agent shell use)
+    # Additional patterns (defaults already block Format-Volume, iex downloads, etc.)
+    blocklist: []
+    allowlist: []            # used only when mode: allowlist
+  rate_limits:
+    window_seconds: 60
+    max_tool_calls: 120      # per runner id (host:pid)
+    max_llm_calls: 40        # LLM burst cap per runner / window

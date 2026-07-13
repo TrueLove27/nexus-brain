@@ -28,8 +28,28 @@ def register_repo_tools(registry) -> None:
         except Exception:
             registry.run_powershell(f'Start-Process notepad "{path}"')
 
+    def _resolve(path: str) -> Path | str:
+        """Resolve path; return error string if sandbox denies it."""
+        policy = getattr(registry, "policy", None)
+        if policy is not None and policy.enabled:
+            denied = policy.check_path(path, ws)
+            if denied:
+                return f"Error: {denied}"
+            return policy.resolve_path(path, ws)
+        return Path(path) if Path(path).is_absolute() else ws / path
+
     def clone_repo(url: str, directory: str = "") -> str:
-        dest = Path(directory) if directory else ws / Path(url.rstrip("/").split("/")[-1]).stem
+        if directory:
+            dest = _resolve(directory)
+            if isinstance(dest, str):
+                return dest
+        else:
+            dest = ws / Path(url.rstrip("/").split("/")[-1]).stem
+            policy = getattr(registry, "policy", None)
+            if policy is not None and policy.enabled:
+                denied = policy.check_path(dest, ws)
+                if denied:
+                    return f"Error: {denied}"
         if dest.exists() and any(dest.iterdir()):
             events.emit("repo_cloned", {"path": str(dest), "status": "exists"})
             _open_editor(dest)
@@ -41,7 +61,9 @@ def register_repo_tools(registry) -> None:
         return f"Cloned to {dest}\n{output}"
 
     def write_file_live(path: str, content: str) -> str:
-        p = Path(path) if Path(path).is_absolute() else ws / path
+        p = _resolve(path)
+        if isinstance(p, str):
+            return p
         p.parent.mkdir(parents=True, exist_ok=True)
         events.emit("code_write_start", {"path": str(p), "length": len(content)})
         _open_editor(p)
@@ -64,6 +86,15 @@ def register_repo_tools(registry) -> None:
         return f"Live-wrote {len(content)} chars to {p} (visible on screen)"
 
     def run_command_live(command: str, cwd: str = "") -> str:
+        policy = getattr(registry, "policy", None)
+        if policy is not None and policy.enabled:
+            denied = policy.check_shell_command(command)
+            if denied:
+                return f"Error: {denied}"
+            if cwd:
+                path_denied = policy.check_path(cwd, ws)
+                if path_denied:
+                    return f"Error: {path_denied}"
         work_dir = cwd or str(ws)
         events.emit("terminal_start", {"command": command, "cwd": work_dir})
         proc = subprocess.Popen(
@@ -82,7 +113,9 @@ def register_repo_tools(registry) -> None:
         return output[:8000] or f"(exit code {proc.returncode})"
 
     def open_in_editor(path: str) -> str:
-        p = Path(path) if Path(path).is_absolute() else ws / path
+        p = _resolve(path)
+        if isinstance(p, str):
+            return p
         if not p.exists():
             return f"Error: not found: {p}"
         _open_editor(p if p.is_dir() else p.parent)
@@ -90,7 +123,9 @@ def register_repo_tools(registry) -> None:
         return f"Opened {p} in {editor}"
 
     def git_status(directory: str = ".") -> str:
-        p = Path(directory) if Path(directory).is_absolute() else ws / directory
+        p = _resolve(directory)
+        if isinstance(p, str):
+            return p
         events.emit("terminal_start", {"command": "git status", "cwd": str(p)})
         output = registry.run_powershell("git status --short", cwd=str(p))
         for line in output.splitlines()[:30]:

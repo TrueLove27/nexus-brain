@@ -4,10 +4,13 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
+from core.tool_policy import ToolPolicy
+
 
 class ToolRegistry:
-    def __init__(self, workspace: str):
+    def __init__(self, workspace: str, policy: ToolPolicy | None = None):
         self.workspace = Path(workspace)
+        self.policy = policy
         self._tools: dict[str, dict[str, Any]] = {}
         self._register_builtins()
 
@@ -45,9 +48,18 @@ class ToolRegistry:
         if name not in self._tools:
             return f"Error: unknown tool '{name}'. Available: {', '.join(self._tools.keys())}"
         try:
+            if self.policy is not None:
+                denied = self.policy.check_tool(name, args or {}, self.workspace)
+                if denied:
+                    from core.events import EventBus
+                    EventBus.get().emit("tool_denied", {"tool": name, "reason": denied[:400]})
+                    return f"Error: {denied}"
+
             from core.events import EventBus
             EventBus.get().emit("tool_start", {"tool": name, "args": args})
             result = self._tools[name]["handler"](**args)
+            if self.policy is not None:
+                self.policy.record_tool()
             EventBus.get().emit("tool_done", {"tool": name, "result": result[:500]})
             return result
         except TypeError as e:
@@ -63,6 +75,20 @@ class ToolRegistry:
         return "\n".join(lines)
 
     def run_powershell(self, command: str, cwd: str | None = None, timeout: int = 120) -> str:
+        if self.policy is not None and self.policy.enabled:
+            denied = self.policy.check_shell_command(command)
+            if denied:
+                return f"Error: {denied}"
+            if cwd:
+                path_denied = self.policy.check_path(cwd, self.workspace)
+                if path_denied:
+                    return f"Error: {path_denied}"
+            else:
+                # Confine default shell cwd to workspace root.
+                work_check = self.policy.check_path(self.workspace, self.workspace)
+                if work_check:
+                    return f"Error: {work_check}"
+
         work_dir = cwd or str(self.workspace)
         result = subprocess.run(
             ["powershell", "-NoProfile", "-Command", command],

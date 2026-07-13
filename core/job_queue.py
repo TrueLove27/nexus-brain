@@ -70,6 +70,7 @@ class DurableJobQueue:
         )
         return cls(
             repo,
+            runner_id=getattr(engine, "runner_id", None),
             lease_seconds=lease_seconds,
             heartbeat_seconds=heartbeat_seconds,
             max_attempts=retry_cfg.get("max_attempts", cfg.get("max_attempts", DEFAULT_MAX_ATTEMPTS)),
