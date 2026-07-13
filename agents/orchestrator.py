@@ -69,7 +69,12 @@ class OrchestratorAgent:
             {"role": "user", "content": user_content},
         ], temperature=0.4)
 
-    def execute(self, goal: str) -> dict[str, Any]:
+    def execute(
+        self,
+        goal: str,
+        *,
+        resume_checkpoint: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         task_id = self.memory.log_task(goal, "orchestrator")
         all_steps: list[dict] = []
         history = self.memory.get_history_context(goal)
@@ -90,45 +95,65 @@ class OrchestratorAgent:
             self.memory.remember(f"Chatted: {goal} → {reply[:120]}", category="chat")
             return {"status": "done", "result": reply, "agent": "Nexus", "steps": [], "task_id": task_id}
 
-        direct = try_direct(goal, self.factory.tools)
-        if direct and direct.get("status") == "teach":
-            pref = direct.get("preference", "")
-            if hasattr(self.memory, "set_preference"):
-                self.memory.set_preference(pref[:60], pref)
-            self.factory.personality.append_user_preference(pref)
-            self.memory.remember(pref, category="preference")
-            reply = f"Got it — I'll remember: {pref}"
-            self.memory.complete_task(task_id, reply, [])
-            if hasattr(self.memory, "log_message"):
-                self.memory.log_message("nexus", reply, task_id)
-            return {"status": "done", "result": reply, "agent": "Nexus", "steps": [], "task_id": task_id}
+        # Skip planner shortcuts when resuming — tool work already started.
+        from core.react_checkpoint import checkpoint_has_progress, resume_context_block
 
-        if direct and direct.get("status") == "done":
-            self.memory.complete_task(task_id, direct["result"], direct.get("steps", []))
-            self.memory.remember(f"Completed: {goal} → {direct['result'][:200]}", category="task")
-            return {**direct, "agent": "direct", "task_id": task_id}
+        resuming = checkpoint_has_progress(resume_checkpoint)
+        if not resuming:
+            direct = try_direct(goal, self.factory.tools)
+            if direct and direct.get("status") == "teach":
+                pref = direct.get("preference", "")
+                if hasattr(self.memory, "set_preference"):
+                    self.memory.set_preference(pref[:60], pref)
+                self.factory.personality.append_user_preference(pref)
+                self.memory.remember(pref, category="preference")
+                reply = f"Got it — I'll remember: {pref}"
+                self.memory.complete_task(task_id, reply, [])
+                if hasattr(self.memory, "log_message"):
+                    self.memory.log_message("nexus", reply, task_id)
+                return {"status": "done", "result": reply, "agent": "Nexus", "steps": [], "task_id": task_id}
+
+            if direct and direct.get("status") == "done":
+                self.memory.complete_task(task_id, direct["result"], direct.get("steps", []))
+                self.memory.remember(f"Completed: {goal} → {direct['result'][:200]}", category="task")
+                return {**direct, "agent": "direct", "task_id": task_id}
+
+        resume_block = resume_context_block(resume_checkpoint) if resuming else ""
+        if resume_block:
+            context_parts.insert(0, resume_block)
 
         if self._is_self_ui_goal(goal):
             context_parts.insert(0, self._self_ui_context())
             agent_id = "coder"
         else:
-            agent_id = self.factory.pick_agent_for_goal(goal)
+            # Prefer the agent that last checkpointed when resuming.
+            preferred = (resume_checkpoint or {}).get("agent_id") if resuming else None
+            agent_id = preferred if preferred and self.factory.get(preferred) else self.factory.pick_agent_for_goal(goal)
 
         current_agent = self.factory.get(agent_id) or self.agent
         sub_goal = goal
         depth = 0
         max_depth = 5
+        # Only the first ReAct invocation gets the durable resume payload.
+        pending_checkpoint = resume_checkpoint if resuming else None
 
         while depth < max_depth:
             context = "\n".join(context_parts) if context_parts else ""
-            result = current_agent.run(sub_goal, context=context)
+            run_kwargs: dict[str, Any] = {"context": context}
+            if pending_checkpoint is not None:
+                run_kwargs["resume_checkpoint"] = pending_checkpoint
+                pending_checkpoint = None
+            result = current_agent.run(sub_goal, **run_kwargs)
             all_steps.extend(result.get("steps", []))
 
             if result["status"] == "done":
                 self.memory.complete_task(task_id, result["result"], all_steps)
                 self.memory.remember(f"Completed: {goal} → {result['result'][:200]}", category="task")
-                return {"status": "done", "result": result["result"], "agent": current_agent.name,
-                        "steps": all_steps, "task_id": task_id}
+                out = {"status": "done", "result": result["result"], "agent": current_agent.name,
+                       "steps": all_steps, "task_id": task_id}
+                if result.get("resumed") or resuming:
+                    out["resumed"] = True
+                return out
 
             if result["status"] == "delegate":
                 delegate_id = result.get("delegate_to") or self.factory.pick_agent_for_goal(result.get("sub_goal", ""))
@@ -158,7 +183,10 @@ class OrchestratorAgent:
 
             if result["status"] == "incomplete":
                 self.memory.fail_task(task_id, result.get("result", "incomplete"))
-                return {"status": "incomplete", "result": result.get("result"), "steps": all_steps, "task_id": task_id}
+                out = {"status": "incomplete", "result": result.get("result"), "steps": all_steps, "task_id": task_id}
+                if result.get("resumed") or resuming:
+                    out["resumed"] = True
+                return out
 
             break
 

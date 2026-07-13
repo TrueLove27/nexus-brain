@@ -144,6 +144,10 @@ class ProactiveDaemon:
             job_id = int(job["id"])
             attempt = int(job.get("attempts") or 1)
             fence_token = int(job.get("fence_token") or 0)
+            from core.react_checkpoint import checkpoint_has_progress, normalize_checkpoint
+
+            checkpoint = normalize_checkpoint(job.get("checkpoint"))
+            resuming = checkpoint_has_progress(checkpoint)
             self._log("queue_claim", {
                 "job_id": job_id,
                 "goal": goal[:200],
@@ -152,12 +156,30 @@ class ProactiveDaemon:
                 "fence_token": fence_token,
                 "lease_reclaimed": bool(job.get("lease_reclaimed")),
                 "prev_owner": job.get("prev_owner"),
+                "resume_checkpoint": resuming,
+                "checkpoint_steps": int(checkpoint.get("step_count") or len(checkpoint.get("steps") or [])),
             })
 
             hb = _LeaseHeartbeat(self._queue, job_id, fence_token, attempt=attempt)
             hb.start()
+
+            def _save_checkpoint(cp: dict) -> bool:
+                return self._queue.save_checkpoint(
+                    job_id,
+                    cp,
+                    fence_token=fence_token,
+                    attempt=attempt,
+                )
+
             try:
-                result = self.engine.run(goal, job_id=job_id, job_attempt=attempt)
+                result = self.engine.run(
+                    goal,
+                    job_id=job_id,
+                    job_attempt=attempt,
+                    fence_token=fence_token,
+                    resume_checkpoint=checkpoint if resuming else None,
+                    checkpoint_saver=_save_checkpoint,
+                )
             except Exception as e:
                 result = {"status": "failed", "result": str(e)}
                 self._log("task_error", {"goal": goal[:200], "error": str(e), "job_id": job_id})
@@ -165,12 +187,14 @@ class ProactiveDaemon:
                 hb.stop()
 
             # Lease stolen mid-run: do not complete/fail — new owner owns the row.
+            # Checkpoint already durable on the jobs row for the reclaiming runner.
             if hb.lost.is_set():
                 self._log("queue_fenced_out", {
                     "job_id": job_id,
                     "fence_token": fence_token,
                     "renewals": hb.renewals,
                     "goal": goal[:200],
+                    "checkpoint_left": True,
                 })
                 processed += 1
                 continue
@@ -196,6 +220,7 @@ class ProactiveDaemon:
             else:
                 err = str((result or {}).get("result") or status)
                 # Queue owns retry/backoff via attempts + lease reclaim — no file re-queue.
+                # Checkpoint retained on retry-scheduled so the next claim can resume.
                 updated = self._queue.fail(
                     job_id,
                     err,
@@ -212,6 +237,7 @@ class ProactiveDaemon:
                     "task_id": task_id,
                     "fence_token": fence_token,
                     "fenced_out": updated is None,
+                    "resumed": bool((result or {}).get("resumed")),
                 })
                 if new_status == "failed":
                     from brain.inbox import write_failed_task
@@ -231,6 +257,7 @@ class ProactiveDaemon:
                 "fence_token": fence_token,
                 "lease_renewals": hb.renewals,
                 "source": "durable_queue",
+                "resumed": bool((result or {}).get("resumed")),
             })
             if self.on_task_complete:
                 self.on_task_complete(goal, result)

@@ -155,6 +155,30 @@ class JobQueueRepo:
             conn.commit()
             return cur.rowcount > 0
 
+    def save_checkpoint(
+        self,
+        job_id: int,
+        runner_id: str,
+        *,
+        fence_token: int,
+        checkpoint: dict[str, Any],
+    ) -> bool:
+        """
+        Persist a ReAct step checkpoint if this runner still owns the fence.
+        Survives lease reclaim so a new owner can resume mid-goal.
+        """
+        now = _now()
+        payload = checkpoint if isinstance(checkpoint, dict) else {}
+        with self._conn() as conn:
+            cur = conn.execute(
+                """UPDATE jobs SET checkpoint = %s::jsonb, updated_at = %s
+                   WHERE id = %s AND status = 'running'
+                     AND lease_owner = %s AND fence_token = %s""",
+                (json.dumps(payload), now, job_id, runner_id, int(fence_token)),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+
     def complete(
         self,
         job_id: int,
@@ -169,6 +193,7 @@ class JobQueueRepo:
                 """UPDATE jobs SET
                        status = 'done',
                        result = %s,
+                       checkpoint = '{}'::jsonb,
                        lease_owner = NULL,
                        lease_expires_at = NULL,
                        completed_at = %s,
@@ -235,6 +260,7 @@ class JobQueueRepo:
                            status = 'failed',
                            error = %s,
                            result = %s,
+                           checkpoint = '{}'::jsonb,
                            lease_owner = NULL,
                            lease_expires_at = NULL,
                            completed_at = %s,
@@ -254,6 +280,7 @@ class JobQueueRepo:
                 """UPDATE jobs SET
                        status = 'cancelled',
                        error = %s,
+                       checkpoint = '{}'::jsonb,
                        lease_owner = NULL,
                        lease_expires_at = NULL,
                        completed_at = %s,

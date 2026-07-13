@@ -175,10 +175,29 @@ class NexusEngine:
                 return f"Last time we were working on: {goal[:80]}"
         return None
 
-    def run(self, goal: str, *, job_id: int | None = None, job_attempt: int = 1) -> dict[str, Any]:
+    def run(
+        self,
+        goal: str,
+        *,
+        job_id: int | None = None,
+        job_attempt: int = 1,
+        fence_token: int | None = None,
+        resume_checkpoint: dict | None = None,
+        checkpoint_saver=None,
+    ) -> dict[str, Any]:
         """Execute a goal. When job_id is set, tool_calls/agent_events link to that durable job."""
-        with job_scope(job_id, runner_id=self.runner_id):
-            return self._run_inner(goal, job_id=job_id, job_attempt=job_attempt)
+        with job_scope(
+            job_id,
+            runner_id=self.runner_id,
+            fence_token=fence_token,
+            checkpoint_saver=checkpoint_saver,
+        ):
+            return self._run_inner(
+                goal,
+                job_id=job_id,
+                job_attempt=job_attempt,
+                resume_checkpoint=resume_checkpoint,
+            )
 
     def _run_inner(
         self,
@@ -186,33 +205,50 @@ class NexusEngine:
         *,
         job_id: int | None = None,
         job_attempt: int = 1,
+        resume_checkpoint: dict | None = None,
     ) -> dict[str, Any]:
+        from core.react_checkpoint import checkpoint_has_progress
+
         self._ensure_session()
         if hasattr(self.memory, "log_message"):
             self.memory.log_message("user", goal)
 
+        resuming = checkpoint_has_progress(resume_checkpoint)
         if job_id is not None:
             self.bus.emit("job_started", {
                 "job_id": job_id,
                 "attempt": job_attempt,
                 "goal": goal[:200],
+                "resuming": resuming,
+                "checkpoint_steps": int((resume_checkpoint or {}).get("step_count") or 0) if resuming else 0,
             })
             if hasattr(self.memory, "record_job_trace"):
                 try:
+                    event = "resumed" if resuming else "started"
                     self.memory.record_job_trace(
                         job_id,
-                        "started",
+                        event,
                         attempt=job_attempt,
-                        payload={"goal": goal[:200]},
+                        payload={
+                            "goal": goal[:200],
+                            "resuming": resuming,
+                            "checkpoint_steps": int((resume_checkpoint or {}).get("step_count") or 0) if resuming else 0,
+                            "next_iteration": (resume_checkpoint or {}).get("next_iteration") if resuming else None,
+                        },
                     )
                 except Exception:
                     pass
 
-        result = self.orchestrator.execute(goal)
+        if resuming:
+            result = self.orchestrator.execute(goal, resume_checkpoint=resume_checkpoint)
+        else:
+            result = self.orchestrator.execute(goal)
         task_id = result.get("task_id")
         steps = result.get("steps", [])
         if job_id is not None:
             result = {**result, "job_id": job_id}
+        if resuming:
+            result = {**result, "resumed": True}
 
         if hasattr(self.memory, "log_tool_steps") and task_id:
             try:

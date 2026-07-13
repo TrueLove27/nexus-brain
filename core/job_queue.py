@@ -143,6 +143,9 @@ class DurableJobQueue:
         job_id = int(job["id"])
         attempt = int(job.get("attempts") or 1)
         fence = self._fence_token(job)
+        from core.react_checkpoint import checkpoint_has_progress, normalize_checkpoint
+
+        job["checkpoint"] = normalize_checkpoint(job.get("checkpoint"))
         if job.get("lease_reclaimed"):
             self._trace(
                 job_id,
@@ -155,6 +158,8 @@ class DurableJobQueue:
                     "new_owner": self.runner_id,
                     "fence_token": fence,
                     "goal": (job.get("goal") or "")[:200],
+                    "has_checkpoint": checkpoint_has_progress(job["checkpoint"]),
+                    "checkpoint_steps": int((job["checkpoint"] or {}).get("step_count") or 0),
                 },
             )
         self._trace(
@@ -165,6 +170,7 @@ class DurableJobQueue:
                 "goal": (job.get("goal") or "")[:200],
                 "reclaimed": bool(job.get("lease_reclaimed")),
                 "fence_token": fence,
+                "has_checkpoint": checkpoint_has_progress(job["checkpoint"]),
             },
         )
         return job
@@ -184,6 +190,35 @@ class DurableJobQueue:
                 "fenced_out",
                 attempt=attempt,
                 payload={"op": "heartbeat", "fence_token": int(fence_token)},
+            )
+        return ok
+
+    def save_checkpoint(
+        self,
+        job_id: int,
+        checkpoint: dict[str, Any],
+        *,
+        fence_token: int,
+        attempt: int = 1,
+    ) -> bool:
+        """Fence-checked ReAct step checkpoint. False if ownership was stolen."""
+        ok = self.repo.save_checkpoint(
+            job_id,
+            self.runner_id,
+            fence_token=fence_token,
+            checkpoint=checkpoint,
+        )
+        # Successful checkpoints stay off the trace log (high volume); fence loss is recorded.
+        if not ok:
+            self._trace(
+                job_id,
+                "fenced_out",
+                attempt=attempt,
+                payload={
+                    "op": "checkpoint",
+                    "fence_token": int(fence_token),
+                    "step_count": int(checkpoint.get("step_count") or len(checkpoint.get("steps") or [])),
+                },
             )
         return ok
 

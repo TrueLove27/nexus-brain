@@ -121,6 +121,16 @@ class JobTraceRepo:
         job_dict = dict(job)
         reclaim_count = sum(1 for t in traces if t["event_type"] == "lease_reclaimed")
         fenced_count = sum(1 for t in traces if t["event_type"] == "fenced_out")
+        resumed_count = sum(1 for t in traces if t["event_type"] == "resumed")
+        cp = job_dict.get("checkpoint") or {}
+        if isinstance(cp, str):
+            try:
+                cp = json.loads(cp)
+            except json.JSONDecodeError:
+                cp = {}
+        if not isinstance(cp, dict):
+            cp = {}
+        cp_steps = cp.get("steps") if isinstance(cp.get("steps"), list) else []
         return {
             "job": job_dict,
             "traces": [dict(r) for r in traces],
@@ -132,7 +142,10 @@ class JobTraceRepo:
                 "status": job_dict.get("status"),
                 "lease_reclaims": reclaim_count,
                 "fenced_out": fenced_count,
+                "resumes": resumed_count,
                 "fence_token": int(job_dict.get("fence_token") or 0),
+                "checkpoint_steps": len(cp_steps),
+                "checkpoint_next_iteration": cp.get("next_iteration"),
                 "tool_call_count": len(tool_calls),
                 "agent_event_count": len(events),
                 "trace_count": len(traces),

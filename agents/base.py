@@ -8,7 +8,12 @@ from typing import Any
 
 from tools.registry import ToolRegistry
 from core.events import EventBus
-from core.job_context import get_job_id
+from core.job_context import get_job_id, save_step_checkpoint
+from core.react_checkpoint import (
+    build_checkpoint,
+    checkpoint_has_progress,
+    rebuild_messages_from_checkpoint,
+)
 from core.summary import summarize_incomplete
 
 
@@ -56,20 +61,15 @@ When done:
         "what you tried, what worked, what blocked you, and what the user should do next."
     )
 
-    def run(self, goal: str, context: str = "") -> dict[str, Any]:
+    def run(
+        self,
+        goal: str,
+        context: str = "",
+        *,
+        resume_checkpoint: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         tool_docs = self.tools.descriptions()
-        messages = [
-            {"role": "system", "content": self.system_prompt + self.TOOL_EXAMPLES},
-            {"role": "user", "content": (
-                f"## Goal\n{goal}\n\n"
-                f"## Available tools\n{tool_docs}\n\n"
-                + (f"## Context\n{context}\n\n" if context else "")
-                + "If this is just a greeting or casual chat, reply with action: finish and a short friendly message — do NOT use any tools.\n"
-                + "Only use tools when the user clearly wants something done on their computer.\n"
-                + "When the goal is done, call action: finish immediately. Do not keep exploring.\n"
-                + "Reply with ONLY a single JSON object — no other text."
-            )},
-        ]
+        system_content = self.system_prompt + self.TOOL_EXAMPLES
 
         steps: list[dict] = []
         final_result = ""
@@ -77,8 +77,49 @@ When done:
         recent_actions: list[str] = []
         wind_down_sent = False
         stuck_sent = False
+        start_i = 0
+        resumed = False
 
-        for i in range(self.max_iterations):
+        if checkpoint_has_progress(resume_checkpoint):
+            (
+                messages,
+                steps,
+                start_i,
+                recent_actions,
+                parse_failures,
+                wind_down_sent,
+                stuck_sent,
+            ) = rebuild_messages_from_checkpoint(
+                system_content=system_content,
+                goal=goal,
+                tool_docs=tool_docs,
+                context=context,
+                checkpoint=resume_checkpoint or {},
+            )
+            resumed = True
+            if start_i >= self.max_iterations:
+                final_result = summarize_incomplete(steps, goal)
+                return {
+                    "status": "incomplete",
+                    "result": final_result,
+                    "steps": steps,
+                    "resumed": True,
+                }
+        else:
+            messages = [
+                {"role": "system", "content": system_content},
+                {"role": "user", "content": (
+                    f"## Goal\n{goal}\n\n"
+                    f"## Available tools\n{tool_docs}\n\n"
+                    + (f"## Context\n{context}\n\n" if context else "")
+                    + "If this is just a greeting or casual chat, reply with action: finish and a short friendly message — do NOT use any tools.\n"
+                    + "Only use tools when the user clearly wants something done on their computer.\n"
+                    + "When the goal is done, call action: finish immediately. Do not keep exploring.\n"
+                    + "Reply with ONLY a single JSON object — no other text."
+                )},
+            ]
+
+        for i in range(start_i, self.max_iterations):
             if i >= self.wind_down_at and not wind_down_sent:
                 messages.append({"role": "user", "content": self.WIND_DOWN_MSG})
                 wind_down_sent = True
@@ -109,13 +150,19 @@ When done:
             if act == "delegate":
                 steps.append({"iteration": i, "action": "delegate", "thought": thought,
                               "args": action.get("args", {})})
-                return {"status": "delegate", "delegate_to": action.get("args", {}).get("agent"),
-                        "sub_goal": action.get("args", {}).get("goal", goal),
-                        "steps": steps, "thought": thought}
+                out = {"status": "delegate", "delegate_to": action.get("args", {}).get("agent"),
+                       "sub_goal": action.get("args", {}).get("goal", goal),
+                       "steps": steps, "thought": thought}
+                if resumed:
+                    out["resumed"] = True
+                return out
 
             if act == "create_agent":
                 steps.append({"iteration": i, "action": "create_agent", "args": action.get("args", {})})
-                return {"status": "create_agent", "spec": action.get("args", {}), "steps": steps}
+                out = {"status": "create_agent", "spec": action.get("args", {}), "steps": steps}
+                if resumed:
+                    out["resumed"] = True
+                return out
 
             args = action.get("args", {})
             action_key = self._action_key(act, args)
@@ -136,16 +183,41 @@ When done:
                 event_data["job_id"] = jid
             EventBus.get().emit("agent_action", event_data)
             tool_result = self.tools.execute(act, args)
-            steps.append({"iteration": i, "action": act, "args": args, "result": tool_result[:2000]})
+            steps.append({
+                "iteration": i,
+                "action": act,
+                "thought": thought,
+                "args": args,
+                "result": tool_result[:2000],
+            })
+
+            # Durable job: persist after each successful tool iteration for lease-resume.
+            save_step_checkpoint(
+                build_checkpoint(
+                    steps=steps,
+                    next_iteration=i + 1,
+                    recent_actions=recent_actions,
+                    parse_failures=parse_failures,
+                    wind_down_sent=wind_down_sent,
+                    stuck_sent=stuck_sent,
+                    agent_id=self.agent_id,
+                )
+            )
 
             messages.append({"role": "assistant", "content": response})
             messages.append({"role": "user", "content": f"Tool result for {act}:\n{tool_result}\n\nContinue toward the goal. Call finish when done."})
 
         else:
             final_result = summarize_incomplete(steps, goal)
-            return {"status": "incomplete", "result": final_result, "steps": steps}
+            out = {"status": "incomplete", "result": final_result, "steps": steps}
+            if resumed:
+                out["resumed"] = True
+            return out
 
-        return {"status": "done", "result": final_result, "steps": steps}
+        out = {"status": "done", "result": final_result, "steps": steps}
+        if resumed:
+            out["resumed"] = True
+        return out
 
     @staticmethod
     def _action_key(action: str, args: dict) -> str:
