@@ -26,6 +26,10 @@ brain:
   stuck_action_threshold: 3
   wind_down_at_iteration: 24
   learn_from_every_task: true
+  # Validated learning: embed + dedupe (≥0.88) + contradiction retract + task_id
+  learning:
+    duplicate_similarity: 0.88
+    contradiction_similarity: 0.72
   memory_tiers:
     enabled: true
     consolidate_every_n_episodes: 5

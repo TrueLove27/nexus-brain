@@ -13,7 +13,7 @@ log = logging.getLogger("nexus.pgvector")
 
 EMBED_DIM = 768
 
-_TIER_TABLES = ("memory_facts", "memory_episodes", "memory_procedures")
+_TIER_TABLES = ("memory_facts", "memory_episodes", "memory_procedures", "learnings")
 
 
 def ensure_pgvector(conn: Any) -> bool:
@@ -44,7 +44,7 @@ def ensure_pgvector(conn: Any) -> bool:
             if _table_exists(conn, table):
                 _ensure_vector_column(conn, table)
                 _ensure_hnsw(conn, table, f"idx_{table}_embedding_hnsw")
-                if table != "memory_episodes":
+                if table not in ("memory_episodes",):
                     _ensure_tier_tsv(conn, table)
         conn.commit()
         return True
@@ -141,16 +141,21 @@ def _ensure_tier_tsv(conn: Any, table: str) -> None:
         (c.get("column_name") if isinstance(c, dict) else c[0]) for c in cols
     }
     text_col = None
-    for candidate in ("content", "fact", "pattern", "text"):
+    for candidate in ("content", "lesson", "fact", "pattern", "text"):
         if candidate in names:
             text_col = candidate
             break
     if not text_col:
         return
+    # learnings: lesson + task_goal for keyword ranking
+    if table == "learnings" and "task_goal" in names:
+        expr = "coalesce(lesson, '') || ' ' || coalesce(task_goal, '')"
+    else:
+        expr = f"coalesce({text_col}::text, '')"
     conn.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS content_tsv tsvector")
     conn.execute(f"""
         UPDATE {table}
-        SET content_tsv = to_tsvector('english', coalesce({text_col}::text, ''))
+        SET content_tsv = to_tsvector('english', {expr})
         WHERE content_tsv IS NULL
     """)
     conn.execute(f"""
