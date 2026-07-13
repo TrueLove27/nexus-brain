@@ -1,4 +1,4 @@
-"""Durable Postgres job queue — enqueue, lease/claim, status transitions."""
+"""Durable Postgres job queue — enqueue, lease/claim, fencing, status transitions."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from typing import Any
 
 
 DEFAULT_LEASE_SECONDS = 300
+DEFAULT_HEARTBEAT_SECONDS = 60
 DEFAULT_MAX_ATTEMPTS = 4
 DEFAULT_RETRY_BASE_SECONDS = 30
 DEFAULT_RETRY_BACKOFF = 2.0
@@ -23,7 +24,7 @@ def _retry_delay(attempts: int, base: int = DEFAULT_RETRY_BASE_SECONDS, mult: fl
 
 
 class JobQueueRepo:
-    """Low-level queue ops. Single-runner via FOR UPDATE SKIP LOCKED + lease expiry."""
+    """Low-level queue ops. Single-runner via FOR UPDATE SKIP LOCKED + lease + fence token."""
 
     def __init__(self, conn_factory):
         self._conn = conn_factory
@@ -79,7 +80,7 @@ class JobQueueRepo:
     ) -> dict[str, Any] | None:
         """
         Atomically claim one claimable job (pending and available, or expired lease).
-        Concurrent workers use SKIP LOCKED so only one runner wins each row.
+        Bumps fence_token so a prior runner cannot heartbeat/complete/fail after reclaim.
         Returns prev_status / prev_owner when a lease was reclaimed.
         """
         now = _now()
@@ -89,7 +90,8 @@ class JobQueueRepo:
                 """
                 WITH picked AS (
                     SELECT id, status AS prev_status, lease_owner AS prev_owner,
-                           lease_expires_at AS prev_lease_expires_at
+                           lease_expires_at AS prev_lease_expires_at,
+                           fence_token AS prev_fence_token
                     FROM jobs
                     WHERE (
                         status = 'pending' AND available_at <= %s
@@ -106,6 +108,7 @@ class JobQueueRepo:
                     status = 'running',
                     lease_owner = %s,
                     lease_expires_at = %s,
+                    fence_token = COALESCE(picked.prev_fence_token, 0) + 1,
                     attempts = attempts + 1,
                     started_at = COALESCE(started_at, %s),
                     updated_at = %s,
@@ -119,7 +122,8 @@ class JobQueueRepo:
                 RETURNING j.*,
                     picked.prev_status,
                     picked.prev_owner,
-                    picked.prev_lease_expires_at
+                    picked.prev_lease_expires_at,
+                    picked.prev_fence_token
                 """,
                 (now, now, runner_id, lease_exp, now, now),
             ).fetchone()
@@ -135,21 +139,30 @@ class JobQueueRepo:
         job_id: int,
         runner_id: str,
         *,
+        fence_token: int,
         lease_seconds: int = DEFAULT_LEASE_SECONDS,
     ) -> bool:
-        """Extend lease if this runner still owns the job."""
+        """Extend lease if this runner still owns the fenced generation."""
         now = _now()
         lease_exp = now + timedelta(seconds=max(30, int(lease_seconds)))
         with self._conn() as conn:
             cur = conn.execute(
                 """UPDATE jobs SET lease_expires_at = %s, updated_at = %s
-                   WHERE id = %s AND status = 'running' AND lease_owner = %s""",
-                (lease_exp, now, job_id, runner_id),
+                   WHERE id = %s AND status = 'running'
+                     AND lease_owner = %s AND fence_token = %s""",
+                (lease_exp, now, job_id, runner_id, int(fence_token)),
             )
             conn.commit()
             return cur.rowcount > 0
 
-    def complete(self, job_id: int, runner_id: str, result: str = "") -> bool:
+    def complete(
+        self,
+        job_id: int,
+        runner_id: str,
+        result: str = "",
+        *,
+        fence_token: int,
+    ) -> bool:
         now = _now()
         with self._conn() as conn:
             cur = conn.execute(
@@ -160,8 +173,9 @@ class JobQueueRepo:
                        lease_expires_at = NULL,
                        completed_at = %s,
                        updated_at = %s
-                   WHERE id = %s AND status = 'running' AND lease_owner = %s""",
-                ((result or "")[:8000], now, now, job_id, runner_id),
+                   WHERE id = %s AND status = 'running'
+                     AND lease_owner = %s AND fence_token = %s""",
+                ((result or "")[:8000], now, now, job_id, runner_id, int(fence_token)),
             )
             conn.commit()
             return cur.rowcount > 0
@@ -172,19 +186,23 @@ class JobQueueRepo:
         runner_id: str,
         error: str = "",
         *,
+        fence_token: int,
         retry: bool | None = None,
         retry_base_seconds: int = DEFAULT_RETRY_BASE_SECONDS,
         retry_backoff: float = DEFAULT_RETRY_BACKOFF,
     ) -> dict[str, Any] | None:
         """
         Mark job failed, or re-queue as pending when attempts remain.
-        Returns updated job row, or None if ownership mismatch.
+        Returns updated job row, or None if ownership/fence mismatch.
         """
         now = _now()
         with self._conn() as conn:
             row = conn.execute(
-                "SELECT * FROM jobs WHERE id = %s AND status = 'running' AND lease_owner = %s",
-                (job_id, runner_id),
+                """SELECT * FROM jobs
+                   WHERE id = %s AND status = 'running'
+                     AND lease_owner = %s AND fence_token = %s
+                   FOR UPDATE""",
+                (job_id, runner_id, int(fence_token)),
             ).fetchone()
             if not row:
                 conn.commit()
@@ -206,9 +224,10 @@ class JobQueueRepo:
                            lease_expires_at = NULL,
                            available_at = %s,
                            updated_at = %s
-                       WHERE id = %s
+                       WHERE id = %s AND status = 'running'
+                         AND lease_owner = %s AND fence_token = %s
                        RETURNING *""",
-                    (err, available, now, job_id),
+                    (err, available, now, job_id, runner_id, int(fence_token)),
                 ).fetchone()
             else:
                 updated = conn.execute(
@@ -220,9 +239,10 @@ class JobQueueRepo:
                            lease_expires_at = NULL,
                            completed_at = %s,
                            updated_at = %s
-                       WHERE id = %s
+                       WHERE id = %s AND status = 'running'
+                         AND lease_owner = %s AND fence_token = %s
                        RETURNING *""",
-                    (err, err, now, now, job_id),
+                    (err, err, now, now, job_id, runner_id, int(fence_token)),
                 ).fetchone()
             conn.commit()
         return dict(updated) if updated else None
@@ -264,7 +284,8 @@ class JobQueueRepo:
             if status:
                 rows = conn.execute(
                     """SELECT id, goal, status, dedup_key, source, attempts, error,
-                              lease_owner, lease_expires_at, available_at, created_at, completed_at
+                              lease_owner, lease_expires_at, fence_token,
+                              available_at, created_at, completed_at
                        FROM jobs WHERE status = %s
                        ORDER BY created_at DESC LIMIT %s""",
                     (status, limit),
@@ -272,7 +293,8 @@ class JobQueueRepo:
             else:
                 rows = conn.execute(
                     """SELECT id, goal, status, dedup_key, source, attempts, error,
-                              lease_owner, lease_expires_at, available_at, created_at, completed_at
+                              lease_owner, lease_expires_at, fence_token,
+                              available_at, created_at, completed_at
                        FROM jobs ORDER BY created_at DESC LIMIT %s""",
                     (limit,),
                 ).fetchall()

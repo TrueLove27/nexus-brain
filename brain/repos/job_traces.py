@@ -120,6 +120,7 @@ class JobTraceRepo:
 
         job_dict = dict(job)
         reclaim_count = sum(1 for t in traces if t["event_type"] == "lease_reclaimed")
+        fenced_count = sum(1 for t in traces if t["event_type"] == "fenced_out")
         return {
             "job": job_dict,
             "traces": [dict(r) for r in traces],
@@ -130,6 +131,8 @@ class JobTraceRepo:
                 "attempts": int(job_dict.get("attempts") or 0),
                 "status": job_dict.get("status"),
                 "lease_reclaims": reclaim_count,
+                "fenced_out": fenced_count,
+                "fence_token": int(job_dict.get("fence_token") or 0),
                 "tool_call_count": len(tool_calls),
                 "agent_event_count": len(events),
                 "trace_count": len(traces),

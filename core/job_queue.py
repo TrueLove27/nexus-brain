@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from brain.inbox import task_key
 from brain.repos.job_queue import (
+    DEFAULT_HEARTBEAT_SECONDS,
     DEFAULT_LEASE_SECONDS,
     DEFAULT_MAX_ATTEMPTS,
     DEFAULT_RETRY_BACKOFF,
@@ -24,7 +25,7 @@ def default_runner_id() -> str:
 
 
 class DurableJobQueue:
-    """High-level queue: ingest file inbox → claim with lease → complete/fail."""
+    """High-level queue: ingest file inbox → claim with lease → heartbeat → complete/fail."""
 
     def __init__(
         self,
@@ -32,6 +33,7 @@ class DurableJobQueue:
         *,
         runner_id: str | None = None,
         lease_seconds: int = DEFAULT_LEASE_SECONDS,
+        heartbeat_seconds: int = DEFAULT_HEARTBEAT_SECONDS,
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
         retry_base_seconds: int = DEFAULT_RETRY_BASE_SECONDS,
         retry_backoff: float = DEFAULT_RETRY_BACKOFF,
@@ -41,6 +43,8 @@ class DurableJobQueue:
         self.traces = traces
         self.runner_id = runner_id or default_runner_id()
         self.lease_seconds = max(30, int(lease_seconds))
+        # Keep renewals comfortably inside the lease window.
+        self.heartbeat_seconds = max(10, min(int(heartbeat_seconds), self.lease_seconds // 2 or 10))
         self.max_attempts = max(1, int(max_attempts))
         self.retry_base_seconds = max(1, int(retry_base_seconds))
         self.retry_backoff = float(retry_backoff)
@@ -57,9 +61,17 @@ class DurableJobQueue:
         cfg = (engine.config.get("brain") or {}).get("job_queue") or {}
         proactive = engine.config.get("proactive") or {}
         retry_cfg = proactive.get("retry") or {}
+        lease_seconds = int(cfg.get("lease_seconds", DEFAULT_LEASE_SECONDS))
+        heartbeat_seconds = int(
+            cfg.get(
+                "heartbeat_seconds",
+                max(DEFAULT_HEARTBEAT_SECONDS, lease_seconds // 3),
+            )
+        )
         return cls(
             repo,
-            lease_seconds=cfg.get("lease_seconds", DEFAULT_LEASE_SECONDS),
+            lease_seconds=lease_seconds,
+            heartbeat_seconds=heartbeat_seconds,
             max_attempts=retry_cfg.get("max_attempts", cfg.get("max_attempts", DEFAULT_MAX_ATTEMPTS)),
             retry_base_seconds=retry_cfg.get(
                 "base_delay_seconds", cfg.get("retry_base_seconds", DEFAULT_RETRY_BASE_SECONDS)
@@ -93,6 +105,10 @@ class DurableJobQueue:
         except Exception:
             pass
 
+    @staticmethod
+    def _fence_token(job: dict[str, Any]) -> int:
+        return int(job.get("fence_token") or 0)
+
     def enqueue(
         self,
         goal: str,
@@ -125,6 +141,7 @@ class DurableJobQueue:
             return None
         job_id = int(job["id"])
         attempt = int(job.get("attempts") or 1)
+        fence = self._fence_token(job)
         if job.get("lease_reclaimed"):
             self._trace(
                 job_id,
@@ -133,7 +150,9 @@ class DurableJobQueue:
                 payload={
                     "prev_owner": job.get("prev_owner"),
                     "prev_lease_expires_at": str(job.get("prev_lease_expires_at") or ""),
+                    "prev_fence_token": job.get("prev_fence_token"),
                     "new_owner": self.runner_id,
+                    "fence_token": fence,
                     "goal": (job.get("goal") or "")[:200],
                 },
             )
@@ -144,29 +163,59 @@ class DurableJobQueue:
             payload={
                 "goal": (job.get("goal") or "")[:200],
                 "reclaimed": bool(job.get("lease_reclaimed")),
+                "fence_token": fence,
             },
         )
         return job
 
-    def heartbeat(self, job_id: int) -> bool:
-        return self.repo.heartbeat(job_id, self.runner_id, lease_seconds=self.lease_seconds)
+    def heartbeat(self, job_id: int, *, fence_token: int, attempt: int = 1) -> bool:
+        """Renew lease for this fence generation. False means lease was stolen/reclaimed."""
+        ok = self.repo.heartbeat(
+            job_id,
+            self.runner_id,
+            fence_token=fence_token,
+            lease_seconds=self.lease_seconds,
+        )
+        # Successful renewals stay off the trace log (high volume); fence loss is recorded.
+        if not ok:
+            self._trace(
+                job_id,
+                "fenced_out",
+                attempt=attempt,
+                payload={"op": "heartbeat", "fence_token": int(fence_token)},
+            )
+        return ok
 
     def complete(
         self,
         job_id: int,
         result: str = "",
         *,
+        fence_token: int,
         task_id: int | None = None,
         attempt: int = 1,
     ) -> bool:
-        ok = self.repo.complete(job_id, self.runner_id, result)
+        ok = self.repo.complete(
+            job_id,
+            self.runner_id,
+            result,
+            fence_token=fence_token,
+        )
         if ok:
             self._trace(
                 job_id,
                 "completed",
                 attempt=attempt,
                 task_id=task_id,
-                payload={"result": (result or "")[:500]},
+                payload={"result": (result or "")[:500], "fence_token": int(fence_token)},
+            )
+        else:
+            self._trace(
+                job_id,
+                "fenced_out",
+                attempt=attempt,
+                task_id=task_id,
+                payload={"op": "complete", "fence_token": int(fence_token)},
             )
         return ok
 
@@ -175,6 +224,7 @@ class DurableJobQueue:
         job_id: int,
         error: str = "",
         *,
+        fence_token: int,
         retry: bool | None = None,
         task_id: int | None = None,
         attempt: int = 1,
@@ -183,6 +233,7 @@ class DurableJobQueue:
             job_id,
             self.runner_id,
             error,
+            fence_token=fence_token,
             retry=retry,
             retry_base_seconds=self.retry_base_seconds,
             retry_backoff=self.retry_backoff,
@@ -199,7 +250,16 @@ class DurableJobQueue:
                     "error": (error or "")[:500],
                     "status": new_status,
                     "available_at": str(updated.get("available_at") or ""),
+                    "fence_token": int(fence_token),
                 },
+            )
+        else:
+            self._trace(
+                job_id,
+                "fenced_out",
+                attempt=attempt,
+                task_id=task_id,
+                payload={"op": "fail", "fence_token": int(fence_token), "error": (error or "")[:200]},
             )
         return updated
 

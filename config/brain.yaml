@@ -28,6 +28,7 @@ brain:
   learn_from_every_task: true
   job_queue:
     lease_seconds: 300       # claim expires; concurrent runners reclaim stale leases
+    heartbeat_seconds: 60    # mid-run renewals; must stay under lease_seconds
     max_attempts: 4
     retry_base_seconds: 30
     retry_backoff: 2.0

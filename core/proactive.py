@@ -15,6 +15,43 @@ from core.job_queue import DurableJobQueue
 FAILURE_STATUSES = frozenset({"failed", "incomplete", "error"})
 
 
+class _LeaseHeartbeat:
+    """Background lease renewals; stops when the run ends or fencing loses ownership."""
+
+    def __init__(self, queue: DurableJobQueue, job_id: int, fence_token: int, *, attempt: int = 1):
+        self.queue = queue
+        self.job_id = job_id
+        self.fence_token = int(fence_token)
+        self.attempt = attempt
+        self._stop = threading.Event()
+        self.lost = threading.Event()
+        self._thread: threading.Thread | None = None
+        self.renewals = 0
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._loop, name=f"lease-hb-{self.job_id}", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=2)
+
+    def _loop(self) -> None:
+        interval = max(10, int(self.queue.heartbeat_seconds))
+        # First renew after interval; claim already set the initial lease.
+        while not self._stop.wait(interval):
+            ok = self.queue.heartbeat(
+                self.job_id,
+                fence_token=self.fence_token,
+                attempt=self.attempt,
+            )
+            if not ok:
+                self.lost.set()
+                return
+            self.renewals += 1
+
+
 class ProactiveDaemon:
     def __init__(self, engine, interval: int = 30, on_task_complete: Callable | None = None):
         self.engine = engine
@@ -106,36 +143,63 @@ class ProactiveDaemon:
             goal = job["goal"]
             job_id = int(job["id"])
             attempt = int(job.get("attempts") or 1)
+            fence_token = int(job.get("fence_token") or 0)
             self._log("queue_claim", {
                 "job_id": job_id,
                 "goal": goal[:200],
                 "attempts": attempt,
                 "lease_owner": self._queue.runner_id,
+                "fence_token": fence_token,
                 "lease_reclaimed": bool(job.get("lease_reclaimed")),
                 "prev_owner": job.get("prev_owner"),
             })
+
+            hb = _LeaseHeartbeat(self._queue, job_id, fence_token, attempt=attempt)
+            hb.start()
             try:
                 result = self.engine.run(goal, job_id=job_id, job_attempt=attempt)
             except Exception as e:
                 result = {"status": "failed", "result": str(e)}
                 self._log("task_error", {"goal": goal[:200], "error": str(e), "job_id": job_id})
+            finally:
+                hb.stop()
+
+            # Lease stolen mid-run: do not complete/fail — new owner owns the row.
+            if hb.lost.is_set():
+                self._log("queue_fenced_out", {
+                    "job_id": job_id,
+                    "fence_token": fence_token,
+                    "renewals": hb.renewals,
+                    "goal": goal[:200],
+                })
+                processed += 1
+                continue
 
             status = (result or {}).get("status") or "failed"
             task_id = (result or {}).get("task_id")
             if status == "done":
-                self._queue.complete(
+                ok = self._queue.complete(
                     job_id,
                     str((result or {}).get("result") or "done"),
+                    fence_token=fence_token,
                     task_id=task_id,
                     attempt=attempt,
                 )
-                self._retry.clear(goal)
+                if ok:
+                    self._retry.clear(goal)
+                else:
+                    self._log("queue_fenced_out", {
+                        "job_id": job_id,
+                        "op": "complete",
+                        "fence_token": fence_token,
+                    })
             else:
                 err = str((result or {}).get("result") or status)
                 # Queue owns retry/backoff via attempts + lease reclaim — no file re-queue.
                 updated = self._queue.fail(
                     job_id,
                     err,
+                    fence_token=fence_token,
                     task_id=task_id,
                     attempt=attempt,
                 )
@@ -146,6 +210,8 @@ class ProactiveDaemon:
                     "attempts": (updated or {}).get("attempts"),
                     "will_retry": new_status == "pending",
                     "task_id": task_id,
+                    "fence_token": fence_token,
+                    "fenced_out": updated is None,
                 })
                 if new_status == "failed":
                     from brain.inbox import write_failed_task
@@ -162,6 +228,8 @@ class ProactiveDaemon:
                 "status": status,
                 "job_id": job_id,
                 "task_id": task_id,
+                "fence_token": fence_token,
+                "lease_renewals": hb.renewals,
                 "source": "durable_queue",
             })
             if self.on_task_complete:
