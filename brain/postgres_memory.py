@@ -18,6 +18,7 @@ from brain.repos.messages import MessageRepo
 from brain.repos.preferences import PreferenceRepo
 from brain.repos.tasks import TaskRepo
 from brain.repos.tool_calls import ToolCallRepo
+from brain.repos.tool_effects import ToolEffectRepo
 from db.migrate import run_migrations
 
 
@@ -35,10 +36,71 @@ class PostgresMemory:
         self.messages = MessageRepo(self._conn)
         self.tasks = TaskRepo(self._conn)
         self.tool_calls = ToolCallRepo(self._conn)
+        self.tool_effects = ToolEffectRepo(self._conn)
         self.preferences = PreferenceRepo(self._conn)
         self.job_queue = JobQueueRepo(self._conn)
         self.job_traces = JobTraceRepo(self._conn)
         self._conversation_id: int | None = None
+        self._bind_effect_ledger()
+
+    def _bind_effect_ledger(self) -> None:
+        """Wire idempotent tool-call effect ledger hooks for reclaim resumes."""
+        from core.effect_ledger import set_ledger_hooks
+
+        effects = self.tool_effects
+        traces = self.job_traces
+
+        def _lookup(job_id: int, effect_key: str):
+            return effects.get(job_id, effect_key)
+
+        def _record(
+            job_id: int,
+            effect_key: str,
+            *,
+            action: str,
+            args: dict,
+            result: str,
+            iteration: int | None = None,
+            fence_token: int | None = None,
+            runner_id: str | None = None,
+        ):
+            return effects.record_applied(
+                job_id,
+                effect_key,
+                action=action,
+                args=args,
+                result=result,
+                iteration=iteration,
+                fence_token=fence_token,
+                runner_id=runner_id,
+            )
+
+        def _seed(job_id: int, steps: list) -> int:
+            return effects.seed_from_steps(job_id, steps)
+
+        def _on_skip(meta: dict) -> None:
+            try:
+                effects.mark_skipped(int(meta["job_id"]), str(meta["effect_key"]))
+            except Exception:
+                pass
+            try:
+                traces.record(
+                    int(meta["job_id"]),
+                    "effect_skipped",
+                    attempt=1,
+                    runner_id=meta.get("runner_id"),
+                    payload={
+                        "effect_key": meta.get("effect_key"),
+                        "action": meta.get("action"),
+                        "iteration": meta.get("iteration"),
+                        "fence_token": meta.get("fence_token"),
+                        "result_chars": meta.get("result_chars"),
+                    },
+                )
+            except Exception:
+                pass
+
+        set_ledger_hooks(lookup=_lookup, record=_record, seed=_seed, on_skip=_on_skip)
 
     def _conn(self):
         return psycopg.connect(self.dsn, row_factory=dict_row)

@@ -163,6 +163,29 @@ class ProactiveDaemon:
                 "checkpoint_compacted": int(checkpoint.get("compacted_count") or 0),
             })
 
+            # Seed effect ledger from durable checkpoint so reclaim resumes skip
+            # already-applied side effects even if the LLM re-proposes them.
+            if resuming:
+                from core.effect_ledger import seed_effects_from_steps
+
+                seeded = seed_effects_from_steps(job_id, checkpoint.get("steps") or [])
+                if seeded:
+                    self._queue._trace(
+                        job_id,
+                        "effects_seeded",
+                        attempt=attempt,
+                        payload={
+                            "seeded": seeded,
+                            "checkpoint_steps": len(checkpoint.get("steps") or []),
+                            "fence_token": fence_token,
+                        },
+                    )
+                    self._log("effects_seeded", {
+                        "job_id": job_id,
+                        "seeded": seeded,
+                        "fence_token": fence_token,
+                    })
+
             hb = _LeaseHeartbeat(self._queue, job_id, fence_token, attempt=attempt)
             hb.start()
 

@@ -69,12 +69,24 @@ class ToolRegistry:
                     EventBus.get().emit("tool_denied", {"tool": name, "reason": denied[:400]})
                     return f"Error: {denied}"
 
+            from core.effect_ledger import execute_with_ledger
             from core.events import EventBus
-            EventBus.get().emit("tool_start", {"tool": name, "args": args})
-            result = self._tools[name]["handler"](**args)
-            if self.policy is not None:
-                self.policy.record_tool()
-            EventBus.get().emit("tool_done", {"tool": name, "result": result[:500]})
+
+            def _run() -> str:
+                EventBus.get().emit("tool_start", {"tool": name, "args": args})
+                out = self._tools[name]["handler"](**args)
+                if self.policy is not None:
+                    self.policy.record_tool()
+                EventBus.get().emit("tool_done", {"tool": name, "result": out[:500]})
+                return out
+
+            result, skipped = execute_with_ledger(name, args or {}, _run)
+            if skipped:
+                EventBus.get().emit("tool_effect_skipped", {
+                    "tool": name,
+                    "args": args,
+                    "result": (result or "")[:500],
+                })
             return result
         except TypeError as e:
             return f"Error: bad arguments for {name}: {e}"

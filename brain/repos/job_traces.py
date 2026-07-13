@@ -121,11 +121,26 @@ class JobTraceRepo:
                 ).fetchall()
                 tasks = [dict(r) for r in rows]
 
+            try:
+                effects = conn.execute(
+                    """SELECT id, job_id, effect_key, action, iteration, status,
+                              skipped_count, fence_token, runner_id, created_at, updated_at,
+                              LEFT(result, 200) AS result_preview
+                       FROM tool_call_effects WHERE job_id = %s
+                       ORDER BY created_at ASC, id ASC
+                       LIMIT 200""",
+                    (job_id,),
+                ).fetchall()
+            except Exception:
+                effects = []
+
         job_dict = dict(job)
         reclaim_count = sum(1 for t in traces if t["event_type"] == "lease_reclaimed")
         fenced_count = sum(1 for t in traces if t["event_type"] == "fenced_out")
         resumed_count = sum(1 for t in traces if t["event_type"] == "resumed")
         reaped_count = sum(1 for t in traces if t["event_type"] == "subprocesses_reaped")
+        effect_skip_traces = sum(1 for t in traces if t["event_type"] == "effect_skipped")
+        effects_seeded_traces = sum(1 for t in traces if t["event_type"] == "effects_seeded")
         cp = job_dict.get("checkpoint") or {}
         if isinstance(cp, str):
             try:
@@ -143,10 +158,13 @@ class JobTraceRepo:
                 active_children = []
         if not isinstance(active_children, list):
             active_children = []
+        effect_rows = [dict(r) for r in effects]
+        effect_skip_sum = sum(int(r.get("skipped_count") or 0) for r in effect_rows)
         return {
             "job": job_dict,
             "traces": [dict(r) for r in traces],
             "tool_calls": [dict(r) for r in tool_calls],
+            "tool_call_effects": effect_rows,
             "agent_events": [dict(r) for r in events],
             "tasks": tasks,
             "summary": {
@@ -156,6 +174,10 @@ class JobTraceRepo:
                 "fenced_out": fenced_count,
                 "resumes": resumed_count,
                 "subprocesses_reaped": reaped_count,
+                "effect_skipped": effect_skip_traces,
+                "effects_seeded": effects_seeded_traces,
+                "effect_ledger_count": len(effect_rows),
+                "effect_skip_sum": effect_skip_sum,
                 "active_children": len(active_children),
                 "fence_token": int(job_dict.get("fence_token") or 0),
                 "checkpoint_steps": len(cp_steps),

@@ -9,6 +9,9 @@ from typing import Any, Callable, Iterator
 _current_job_id: ContextVar[int | None] = ContextVar("nexus_job_id", default=None)
 _current_runner_id: ContextVar[str | None] = ContextVar("nexus_runner_id", default=None)
 _current_fence_token: ContextVar[int | None] = ContextVar("nexus_fence_token", default=None)
+_current_react_iteration: ContextVar[int | None] = ContextVar(
+    "nexus_react_iteration", default=None
+)
 _checkpoint_saver: ContextVar[Callable[[dict[str, Any]], bool] | None] = ContextVar(
     "nexus_checkpoint_saver", default=None
 )
@@ -48,6 +51,18 @@ def set_fence_token(fence_token: int | None) -> Token:
 
 def reset_fence_token(token: Token) -> None:
     _current_fence_token.reset(token)
+
+
+def get_react_iteration() -> int | None:
+    return _current_react_iteration.get()
+
+
+def set_react_iteration(iteration: int | None) -> Token:
+    return _current_react_iteration.set(iteration)
+
+
+def reset_react_iteration(token: Token) -> None:
+    _current_react_iteration.reset(token)
 
 
 def get_checkpoint_saver() -> Callable[[dict[str, Any]], bool] | None:

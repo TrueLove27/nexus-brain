@@ -8,7 +8,7 @@ from typing import Any
 
 from tools.registry import ToolRegistry
 from core.events import EventBus
-from core.job_context import get_job_id, save_step_checkpoint
+from core.job_context import get_job_id, reset_react_iteration, save_step_checkpoint, set_react_iteration
 from core.react_checkpoint import (
     build_checkpoint,
     checkpoint_has_progress,
@@ -187,7 +187,11 @@ When done:
             if jid is not None:
                 event_data["job_id"] = jid
             EventBus.get().emit("agent_action", event_data)
-            tool_result = self.tools.execute(act, args)
+            iter_token = set_react_iteration(i)
+            try:
+                tool_result = self.tools.execute(act, args)
+            finally:
+                reset_react_iteration(iter_token)
             steps.append({
                 "iteration": i,
                 "action": act,
