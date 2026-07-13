@@ -12,6 +12,7 @@ from agents.orchestrator import OrchestratorAgent
 from brain.learning import BrainLearning
 from brain.personality import BrainPersonality
 from brain.store import MemoryBackend, create_memory
+from brain.consolidation import MemoryConsolidator
 from llm.ollama import OllamaProvider
 from tools.registry import ToolRegistry
 from core.events import EventBus
@@ -76,9 +77,13 @@ class NexusEngine:
         )
         self.orchestrator = OrchestratorAgent(self.factory, self.memory, root)
         self.learning = BrainLearning(self.memory, self.llm.chat)
+        self.consolidator = MemoryConsolidator(
+            self.memory, self.llm.chat, brain_cfg=brain_cfg,
+        )
         self.bus = EventBus.get(root / brain_cfg.get("logs_dir", "data/logs") / "live_events.jsonl")
         self._ensure_session()
         self._wire_event_logging()
+        self._last_consolidate_stats: dict[str, Any] = {}
 
     def _wire_event_logging(self) -> None:
         if not hasattr(self.memory, "tool_calls"):
@@ -145,6 +150,23 @@ class NexusEngine:
             except Exception:
                 job_traces = {}
 
+        pgvector_ok = False
+        memory_count = 0
+        if hasattr(self.memory, "memory_stats"):
+            try:
+                stats = self.memory.memory_stats()
+                pgvector_ok = bool(stats.get("pgvector"))
+                memory_count = int(stats.get("memory_count") or 0)
+            except Exception:
+                pass
+        elif self.memory.storage_type == "sqlite":
+            try:
+                with self.memory._conn() as conn:
+                    row = conn.execute("SELECT COUNT(*) AS c FROM memories").fetchone()
+                    memory_count = int(row["c"] if row else 0)
+            except Exception:
+                memory_count = 0
+
         bridge = PortfolioBridge.from_engine(self)
         model_pulled = self.llm.is_available()
 
@@ -154,6 +176,13 @@ class NexusEngine:
             "agents": len(self.factory.list_all()),
             "storage": self.memory.storage_type,
             "postgres": pg_ok if self.memory.storage_type == "postgres" else "n/a",
+            "pgvector": pgvector_ok if self.memory.storage_type == "postgres" else False,
+            "memory_count": memory_count,
+            "memory_tiers": (
+                self.memory.memory_tier_stats()
+                if hasattr(self.memory, "memory_tier_stats")
+                else None
+            ),
             "memory_db": str(self.memory.db_path),
             "inbox_queue": inbox_pending,
             "inbox_retries": inbox_retries,
@@ -171,7 +200,37 @@ class NexusEngine:
             "env_scrub": self.env_policy.status(),
             "tool_subprocesses": tool_subprocess_status(),
             "effect_ledger": effect_ledger_status(),
+            "memory_tiers": self._memory_tiers_health(),
         }
+
+    def _memory_tiers_health(self) -> dict[str, Any]:
+        stats: dict[str, Any] = {"enabled": False}
+        if hasattr(self.memory, "memory_tier_stats"):
+            try:
+                stats = dict(self.memory.memory_tier_stats())
+            except Exception as exc:
+                stats = {"enabled": True, "error": str(exc)}
+        if getattr(self, "_last_consolidate_stats", None):
+            stats["last_consolidation"] = self._last_consolidate_stats
+        return stats
+
+    def maybe_consolidate(self, force: bool = False) -> dict[str, Any]:
+        """Run memory consolidation when enough unconsolidated episodes exist (or force)."""
+        try:
+            stats = self.consolidator.run(force=force)
+        except Exception as exc:
+            stats = {"ran": False, "reason": f"error:{exc}"}
+        self._last_consolidate_stats = stats
+        if stats.get("ran"):
+            try:
+                self.bus.emit("memory_consolidated", {
+                    k: stats.get(k) for k in (
+                        "episodes_read", "facts_written", "procedures_written", "episodes_marked",
+                    )
+                })
+            except Exception:
+                pass
+        return stats
 
     def runtime_status(self, *, include_health: bool = True) -> dict[str, Any]:
         """Live session progress + inbox queue for desktop UI / status API."""
@@ -276,6 +335,11 @@ class NexusEngine:
             self.learning.learn_from_task(
                 goal, reply, steps, result.get("status") == "done",
             )
+            # Idle/post-task consolidation when episode backlog crosses threshold
+            try:
+                self.maybe_consolidate(force=False)
+            except Exception:
+                pass
 
         if result.get("status") == "done":
             try:
@@ -296,6 +360,7 @@ class NexusEngine:
 
     def teach(self, preference: str) -> None:
         self.personality.append_user_preference(preference)
+        # remember() dual-writes legacy memories + episodic (source=teach for preference)
         self.remember(preference, category="preference")
         if hasattr(self.memory, "set_preference"):
             key = preference[:60].strip()
@@ -308,8 +373,19 @@ class NexusEngine:
     def list_agents(self) -> list[dict]:
         return self.factory.list_all()
 
+    def maybe_consolidate(self, force: bool = False) -> dict[str, Any]:
+        """Run idle consolidation when episode backlog crosses threshold."""
+        try:
+            stats = self.consolidator.run(force=force)
+            self._last_consolidate_stats = stats
+            return stats
+        except Exception as exc:
+            self._last_consolidate_stats = {"ran": False, "reason": f"error:{exc}"}
+            return self._last_consolidate_stats
+
     def remember(self, content: str, category: str = "general") -> int:
         return self.memory.remember(content, category)
 
-    def recall(self, query: str) -> list[str]:
-        return self.memory.recall(query)
+    def recall(self, query: str, limit: int | None = None) -> list[str]:
+        limit = limit if limit is not None else self.config["brain"].get("max_context_memories", 8)
+        return self.memory.recall(query, limit=limit)

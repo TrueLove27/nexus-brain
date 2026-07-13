@@ -16,6 +16,22 @@ class BrainLearning:
             f"  - {s.get('action', '?')}: {str(s.get('result', ''))[:200]}"
             for s in steps[-10:]
         )
+        # Episodic record of the task outcome (feeds consolidation)
+        if hasattr(self.memory, "record_episode"):
+            try:
+                episode = (
+                    f"Task {outcome}: {goal[:300]}\n"
+                    f"Result: {result[:400]}\n"
+                    f"Steps:\n{step_summary[:800]}"
+                )
+                self.memory.record_episode(
+                    episode,
+                    "task",
+                    metadata={"goal": goal[:200], "outcome": outcome, "step_count": len(steps)},
+                )
+            except Exception:
+                pass
+
         prompt = (
             f"A task was {'completed successfully' if success else 'attempted but had issues'}.\n\n"
             f"Goal: {goal}\n"

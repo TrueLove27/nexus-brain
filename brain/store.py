@@ -25,6 +25,7 @@ def create_memory(brain_cfg: dict, llm_cfg: dict, root: Path) -> MemoryBackend:
                 data_dir=data_dir,
                 embed_model=llm_cfg["embed_model"],
                 ollama_url=llm_cfg["base_url"],
+                brain_cfg=brain_cfg,
             )
             with mem._conn() as conn:
                 conn.execute("SELECT 1")
@@ -36,6 +37,7 @@ def create_memory(brain_cfg: dict, llm_cfg: dict, root: Path) -> MemoryBackend:
         db_path=root / brain_cfg["memory_db"],
         embed_model=llm_cfg["embed_model"],
         ollama_url=llm_cfg["base_url"],
+        brain_cfg=brain_cfg,
     )
 
 

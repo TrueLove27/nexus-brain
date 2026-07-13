@@ -26,6 +26,12 @@ brain:
   stuck_action_threshold: 3
   wind_down_at_iteration: 24
   learn_from_every_task: true
+  memory_tiers:
+    enabled: true
+    consolidate_every_n_episodes: 5
+    max_facts_in_context: 5
+    max_procedures_in_context: 3
+    max_episodes_in_context: 4
   job_queue:
     lease_seconds: 300       # claim expires; concurrent runners reclaim stale leases
     heartbeat_seconds: 60    # mid-run renewals; must stay under lease_seconds

@@ -88,7 +88,49 @@ You → Nexus Orchestrator → Specialist Agents → Tools → Your System
       Brain Memory          Agent Factory (spawns new agents)
          ↓
       Learning Loop (trains from outcomes)
+         ↓
+      Multi-tier consolidation (episodes → facts / procedures)
 ```
+
+## Multi-tier memory
+
+Nexus uses a cognitive memory stack instead of a single flat bag:
+
+| Tier | Table | What it stores |
+|------|-------|----------------|
+| **Episodic** | `memory_episodes` | Raw task / chat / tool / teach events |
+| **Semantic** | `memory_facts` | Durable facts distilled from episodes (confidence, supersession) |
+| **Procedural** | `memory_procedures` | How-to / when-to patterns (`trigger_text` + steps) |
+
+**Dual-write:** `remember()` still writes the legacy `memories` table for compatibility and also records an episode.
+
+**Consolidation:** `MemoryConsolidator` reads unconsolidated episodes, asks the LLM for JSON `{facts, procedures}`, writes them, and sets `consolidated_at`. It runs:
+
+- After each task (`NexusEngine.maybe_consolidate`) when unconsolidated count ≥ `brain.memory_tiers.consolidate_every_n_episodes` (default 5)
+- On idle proactive daemon ticks
+- Manually: `engine.maybe_consolidate(force=True)` from a Python shell, or after enough tasks complete
+
+`get_history_context(goal)` injects semantic facts, procedural patterns, and recent episodes alongside the existing task/learning sections. Health exposes counts under `memory_tiers`.
+
+## Hybrid recall (Postgres + pgvector)
+
+When Postgres has the `vector` extension, `PostgresMemory.recall()` uses **hybrid ranking** instead of scanning the last 200 JSONB rows:
+
+| Signal | Weight | Source |
+|--------|--------|--------|
+| Vector similarity | 0.50 | HNSW on `embedding_vec vector(768)` (nomic-embed-text) |
+| Keyword rank | 0.25 | `content_tsv` + GIN (`ts_rank`) |
+| Recency | 0.15 | `created_at` decay |
+| Access | 0.10 | `LN(1 + access_count)` |
+
+If pgvector is missing or the query fails, recall falls back to the JSONB cosine path (same as SQLite). New memories write both JSONB + `embedding_vec` when dims match 768; dim mismatch stores NULL in the vector column.
+
+```powershell
+py scripts/backfill_embeddings.py --limit 500   # copy JSONB → embedding_vec
+py main.py health                               # shows pgvector: true/false + memory_count
+```
+
+`brain.max_context_memories` in `config/brain.yaml` caps how many memories enter agent context.
 
 ## Agents
 
