@@ -28,10 +28,8 @@ class SessionRunner:
     def run(self, on_task: Callable[[str], None] | None = None) -> dict:
         from core.portfolio_bridge import PortfolioBridge
 
-        bridge = PortfolioBridge(
-            inbox_dir=self.engine.root / "data" / "inbox",
-            project="nexus-brain",
-        )
+        # Mark-done + state bump happen inside engine.run() via on_task_success.
+        bridge = PortfolioBridge.from_engine(self.engine)
 
         end = time.time() + self.hours * 3600
         cycles = 0
@@ -56,9 +54,6 @@ class SessionRunner:
             status = result.get("status", "unknown")
             results.append({"cycle": cycles, "task": task_text, "status": status})
             self._log("task_done", {"cycle": cycles, "status": status})
-
-            if status == "done":
-                bridge.mark_task_done(task_text)
 
             remaining = end - time.time()
             if remaining <= 0:

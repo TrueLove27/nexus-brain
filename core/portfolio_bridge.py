@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from core.engine import NexusEngine
 
 
 DEFAULT_ENGINE_ROOT = Path(r"C:\Users\cheki\Desktop\New folder (2)\portfolio-growth-engine")
+PORTFOLIO_HEADER = "PORTFOLIO SESSION TASK"
 
 
 class PortfolioBridge:
@@ -22,6 +28,15 @@ class PortfolioBridge:
         self.project = project
         self.inbox_dir.mkdir(parents=True, exist_ok=True)
 
+    @classmethod
+    def from_engine(cls, engine: "NexusEngine") -> "PortfolioBridge":
+        pg = engine.config.get("portfolio", {}) or {}
+        return cls(
+            engine_root=pg.get("engine_root") or DEFAULT_ENGINE_ROOT,
+            inbox_dir=engine.root / "data" / "inbox",
+            project=pg.get("project", "nexus-brain"),
+        )
+
     @property
     def task_file(self) -> Path:
         return self.engine_root / "tasks" / f"{self.project}.md"
@@ -29,6 +44,10 @@ class PortfolioBridge:
     @property
     def prompts_dir(self) -> Path:
         return self.engine_root / "prompts"
+
+    @property
+    def state_file(self) -> Path:
+        return self.engine_root / "state.json"
 
     def next_unchecked_task(self) -> str | None:
         if not self.task_file.exists():
@@ -51,6 +70,69 @@ class PortfolioBridge:
         if updated:
             self.task_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return updated
+
+    @staticmethod
+    def parse_portfolio_goal(goal: str) -> tuple[str | None, str | None]:
+        """Return (project_slug, task_text) from an inbox body, or (None, None)."""
+        if PORTFOLIO_HEADER not in goal:
+            return None, None
+        proj = re.search(r"^Project:\s*TrueLove27/(\S+)", goal, re.M)
+        task = re.search(r"^Task:\s*(.+)$", goal, re.M)
+        return (
+            proj.group(1) if proj else None,
+            task.group(1).strip() if task else None,
+        )
+
+    def resolve_task_text(self, goal: str) -> str | None:
+        """Map any goal string (inbox body or bare task) to a backlog task line."""
+        project, parsed = self.parse_portfolio_goal(goal)
+        if project:
+            self.project = project
+        if parsed:
+            return parsed
+
+        task = goal.strip()
+        if not self.task_file.exists():
+            return None
+        for line in self.task_file.read_text(encoding="utf-8").splitlines():
+            if line.startswith("- [ ]") and task.lower() in line.lower():
+                return line.replace("- [ ]", "", 1).strip()
+            if line.startswith("- [ ]") and line.lower().replace("- [ ]", "", 1).strip() == task.lower():
+                return task
+        # Exact bare match against unchecked line text
+        for line in self.task_file.read_text(encoding="utf-8").splitlines():
+            if line.startswith("- [ ]"):
+                bare = line.replace("- [ ]", "", 1).strip()
+                if bare.lower() == task.lower() or task.lower() in bare.lower():
+                    return bare
+        return None
+
+    def bump_state(self) -> None:
+        """Increment improvements_on_current and refresh last_run in state.json."""
+        if not self.state_file.exists():
+            return
+        try:
+            state = json.loads(self.state_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return
+
+        state["improvements_on_current"] = int(state.get("improvements_on_current", 0)) + 1
+        state["last_run"] = datetime.now(timezone.utc).isoformat()
+        state["active_project"] = self.project
+        self.state_file.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+
+    def on_task_success(self, goal: str) -> bool:
+        """After a successful run: mark backlog checkbox and bump state.
+
+        Idempotent — already-checked items return False and do not bump state.
+        """
+        task_text = self.resolve_task_text(goal)
+        if not task_text:
+            return False
+        marked = self.mark_task_done(task_text)
+        if marked:
+            self.bump_state()
+        return marked
 
     def drop_next_task(self, local_repo_path: str) -> Path | None:
         task = self.next_unchecked_task()
@@ -83,7 +165,6 @@ Instructions:
         if not match:
             return []
 
-        task = match.group(1).strip()
         stamp = prompt_file.stat().st_mtime
         marker = self.inbox_dir / ".last_prompt_sync"
         last = float(marker.read_text()) if marker.exists() else 0.0

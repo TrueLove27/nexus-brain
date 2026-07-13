@@ -93,7 +93,7 @@ class NexusEngine:
             except Exception:
                 pg_ok = False
 
-        bridge = PortfolioBridge(inbox_dir=inbox)
+        bridge = PortfolioBridge.from_engine(self)
         model_pulled = self.llm.is_available()
 
         return {
@@ -135,6 +135,16 @@ class NexusEngine:
             self.learning.learn_from_task(
                 goal, reply, steps, result.get("status") == "done",
             )
+
+        if result.get("status") == "done":
+            try:
+                from core.portfolio_bridge import PortfolioBridge
+                marked = PortfolioBridge.from_engine(self).on_task_success(goal)
+                if marked:
+                    self.bus.emit("portfolio_task_done", {"goal": goal[:200]})
+            except Exception:
+                pass
+
         return result
 
     def teach(self, preference: str) -> None:

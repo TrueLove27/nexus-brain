@@ -131,7 +131,7 @@ def cmd_session(engine: NexusEngine, hours: float = 3.0):
 def cmd_portfolio(engine: NexusEngine):
     from core.portfolio_bridge import PortfolioBridge
 
-    bridge = PortfolioBridge(inbox_dir=engine.root / "data" / "inbox")
+    bridge = PortfolioBridge.from_engine(engine)
     task = bridge.next_unchecked_task()
     if not task:
         console.print("[yellow]No pending portfolio tasks.[/yellow]")

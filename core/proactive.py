@@ -59,9 +59,7 @@ class ProactiveDaemon:
     def _sync_portfolio_prompts(self) -> None:
         try:
             from core.portfolio_bridge import PortfolioBridge
-            bridge = PortfolioBridge(
-                inbox_dir=self.engine.root / "data" / "inbox",
-            )
+            bridge = PortfolioBridge.from_engine(self.engine)
             dropped = bridge.sync_from_prompts()
             for path in dropped:
                 self._log("portfolio_sync", {"file": str(path)})
