@@ -19,6 +19,7 @@ from core.job_context import get_job_id, job_scope
 from core.job_queue import default_runner_id
 from core.subprocess_env import SubprocessEnvPolicy, set_env_policy
 from core.tool_policy import PolicyGuardedLLM, ToolPolicy
+from core.tool_subprocess import status as tool_subprocess_status
 
 
 class NexusEngine:
@@ -167,6 +168,7 @@ class NexusEngine:
             "portfolio_done": bridge.completed_count(),
             "tool_sandbox": self.tool_policy.status(self.runner_id),
             "env_scrub": self.env_policy.status(),
+            "tool_subprocesses": tool_subprocess_status(),
         }
 
     def runtime_status(self, *, include_health: bool = True) -> dict[str, Any]:

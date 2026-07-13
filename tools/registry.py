@@ -6,6 +6,7 @@ from typing import Any, Callable
 
 from core.subprocess_env import SubprocessEnvPolicy, get_env_policy, scrubbed_environ
 from core.tool_policy import ToolPolicy
+from core.tool_subprocess import is_job_cancelled, run_tracked
 
 
 class ToolRegistry:
@@ -59,6 +60,8 @@ class ToolRegistry:
         if name not in self._tools:
             return f"Error: unknown tool '{name}'. Available: {', '.join(self._tools.keys())}"
         try:
+            if is_job_cancelled():
+                return "Error: lease reclaimed — tool execution cancelled"
             if self.policy is not None:
                 denied = self.policy.check_tool(name, args or {}, self.workspace)
                 if denied:
@@ -86,6 +89,8 @@ class ToolRegistry:
         return "\n".join(lines)
 
     def run_powershell(self, command: str, cwd: str | None = None, timeout: int = 120) -> str:
+        if is_job_cancelled():
+            return "Error: lease reclaimed — refusing to spawn tool subprocess"
         if self.policy is not None and self.policy.enabled:
             denied = self.policy.check_shell_command(command)
             if denied:
@@ -101,10 +106,17 @@ class ToolRegistry:
                     return f"Error: {work_check}"
 
         work_dir = cwd or str(self.workspace)
-        result = subprocess.run(
-            ["powershell", "-NoProfile", "-Command", command],
-            capture_output=True, text=True, cwd=work_dir, timeout=timeout,
-            env=self.child_env(),
-        )
+        try:
+            result = run_tracked(
+                ["powershell", "-NoProfile", "-Command", command],
+                command=command,
+                cwd=work_dir,
+                env=self.child_env(),
+                timeout=timeout,
+            )
+        except RuntimeError as e:
+            return f"Error: {e}"
+        except subprocess.TimeoutExpired:
+            return f"Error: command timed out after {timeout}s"
         output = (result.stdout + result.stderr).strip()
         return output or f"(exit code {result.returncode})"

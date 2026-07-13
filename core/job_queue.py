@@ -144,9 +144,14 @@ class DurableJobQueue:
         attempt = int(job.get("attempts") or 1)
         fence = self._fence_token(job)
         from core.react_checkpoint import checkpoint_has_progress, normalize_checkpoint
+        from core.tool_subprocess import reap_records
 
         job["checkpoint"] = normalize_checkpoint(job.get("checkpoint"))
         if job.get("lease_reclaimed"):
+            prev_children = job.get("prev_children") or []
+            reaped = []
+            if prev_children:
+                reaped = reap_records(prev_children, reason="lease_reclaimed")
             self._trace(
                 job_id,
                 "lease_reclaimed",
@@ -160,8 +165,23 @@ class DurableJobQueue:
                     "goal": (job.get("goal") or "")[:200],
                     "has_checkpoint": checkpoint_has_progress(job["checkpoint"]),
                     "checkpoint_steps": int((job["checkpoint"] or {}).get("step_count") or 0),
+                    "orphan_children": len(prev_children),
+                    "reaped": len(reaped),
                 },
             )
+            if reaped:
+                self._trace(
+                    job_id,
+                    "subprocesses_reaped",
+                    attempt=attempt,
+                    payload={
+                        "reason": "lease_reclaimed",
+                        "prev_fence_token": job.get("prev_fence_token"),
+                        "fence_token": fence,
+                        "results": reaped[:32],
+                    },
+                )
+            job["orphans_reaped"] = reaped
         self._trace(
             job_id,
             "claimed",
@@ -175,6 +195,25 @@ class DurableJobQueue:
         )
         return job
 
+    def bind_subprocess_persist(self) -> None:
+        """Wire durable active_children updates for the current queue runner."""
+        from core.tool_subprocess import set_persist_hook
+
+        def _persist(job_id: int, fence_token: int, children: list) -> bool:
+            try:
+                return bool(
+                    self.repo.save_active_children(
+                        int(job_id),
+                        self.runner_id,
+                        fence_token=int(fence_token),
+                        children=children,
+                    )
+                )
+            except Exception:
+                return False
+
+        set_persist_hook(_persist)
+
     def heartbeat(self, job_id: int, *, fence_token: int, attempt: int = 1) -> bool:
         """Renew lease for this fence generation. False means lease was stolen/reclaimed."""
         ok = self.repo.heartbeat(
@@ -185,12 +224,35 @@ class DurableJobQueue:
         )
         # Successful renewals stay off the trace log (high volume); fence loss is recorded.
         if not ok:
+            from core.tool_subprocess import reap_job_fence, signal_job_cancel
+
+            signal_job_cancel(int(job_id))
+            reaped = reap_job_fence(
+                int(job_id),
+                int(fence_token),
+                reason="fenced_out",
+            )
             self._trace(
                 job_id,
                 "fenced_out",
                 attempt=attempt,
-                payload={"op": "heartbeat", "fence_token": int(fence_token)},
+                payload={
+                    "op": "heartbeat",
+                    "fence_token": int(fence_token),
+                    "subprocesses_reaped": len(reaped),
+                },
             )
+            if reaped:
+                self._trace(
+                    job_id,
+                    "subprocesses_reaped",
+                    attempt=attempt,
+                    payload={
+                        "reason": "fenced_out",
+                        "fence_token": int(fence_token),
+                        "results": reaped[:32],
+                    },
+                )
         return ok
 
     def save_checkpoint(

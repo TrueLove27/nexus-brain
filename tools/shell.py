@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import subprocess
-
 from core.events import EventBus
+from core.tool_subprocess import is_job_cancelled, kill_process_tree, popen_tracked, unregister_pid
 from .registry import ToolRegistry
 
 
@@ -21,23 +20,43 @@ def register_shell_tools(registry: ToolRegistry) -> None:
                 if path_denied:
                     return f"Error: {path_denied}"
 
+        if is_job_cancelled():
+            return "Error: lease reclaimed — refusing to spawn tool subprocess"
+
         work_dir = cwd if cwd else None
         events.emit("terminal_start", {"command": command, "cwd": work_dir or str(registry.workspace)})
-        proc = subprocess.Popen(
-            ["powershell", "-NoProfile", "-Command", command],
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, cwd=work_dir or str(registry.workspace),
-            env=registry.child_env(),
-        )
+        try:
+            proc = popen_tracked(
+                ["powershell", "-NoProfile", "-Command", command],
+                command=command,
+                cwd=work_dir or str(registry.workspace),
+                env=registry.child_env(),
+            )
+        except RuntimeError as e:
+            return f"Error: {e}"
+
         lines = []
-        for line in proc.stdout:
-            line = line.rstrip()
-            lines.append(line)
-            events.emit("terminal_output", {"text": line})
-        proc.wait()
-        output = "\n".join(lines)
-        events.emit("terminal_done", {"command": command, "exit_code": proc.returncode})
-        return (output[:8000] or f"(exit code {proc.returncode})")
+        try:
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                if is_job_cancelled():
+                    kill_process_tree(int(proc.pid))
+                    events.emit("terminal_done", {
+                        "command": command,
+                        "exit_code": -1,
+                        "reaped": True,
+                    })
+                    return "Error: lease reclaimed — tool subprocess terminated"
+                line = line.rstrip()
+                lines.append(line)
+                events.emit("terminal_output", {"text": line})
+            proc.wait()
+            output = "\n".join(lines)
+            events.emit("terminal_done", {"command": command, "exit_code": proc.returncode})
+            return (output[:8000] or f"(exit code {proc.returncode})")
+        finally:
+            if proc.pid:
+                unregister_pid(int(proc.pid))
 
     def list_processes(filter_name: str = "") -> str:
         if filter_name:

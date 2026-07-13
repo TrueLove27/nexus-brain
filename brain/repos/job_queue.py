@@ -91,7 +91,8 @@ class JobQueueRepo:
                 WITH picked AS (
                     SELECT id, status AS prev_status, lease_owner AS prev_owner,
                            lease_expires_at AS prev_lease_expires_at,
-                           fence_token AS prev_fence_token
+                           fence_token AS prev_fence_token,
+                           active_children AS prev_children
                     FROM jobs
                     WHERE (
                         status = 'pending' AND available_at <= %s
@@ -112,6 +113,8 @@ class JobQueueRepo:
                     attempts = attempts + 1,
                     started_at = COALESCE(started_at, %s),
                     updated_at = %s,
+                    -- New owner starts with an empty child set; prev_children returned for reaping.
+                    active_children = '[]'::jsonb,
                     error = CASE
                         WHEN picked.prev_status = 'running'
                         THEN COALESCE(NULLIF(j.error, ''), 'lease_reclaimed')
@@ -123,7 +126,8 @@ class JobQueueRepo:
                     picked.prev_status,
                     picked.prev_owner,
                     picked.prev_lease_expires_at,
-                    picked.prev_fence_token
+                    picked.prev_fence_token,
+                    picked.prev_children
                 """,
                 (now, now, runner_id, lease_exp, now, now),
             ).fetchone()
@@ -132,6 +136,13 @@ class JobQueueRepo:
             return None
         out = dict(row)
         out["lease_reclaimed"] = out.get("prev_status") == "running"
+        prev_children = out.get("prev_children")
+        if isinstance(prev_children, str):
+            try:
+                prev_children = json.loads(prev_children)
+            except Exception:
+                prev_children = []
+        out["prev_children"] = prev_children if isinstance(prev_children, list) else []
         return out
 
     def heartbeat(
@@ -182,6 +193,46 @@ class JobQueueRepo:
             conn.commit()
             return cur.rowcount > 0
 
+    def save_active_children(
+        self,
+        job_id: int,
+        runner_id: str,
+        *,
+        fence_token: int,
+        children: list[dict[str, Any]] | None,
+    ) -> bool:
+        """Fence-checked durable registry of live tool child PIDs (for reclaim reaping)."""
+        now = _now()
+        payload = children if isinstance(children, list) else []
+        # Cap list size; only keep fields needed to kill trees after crash/reclaim.
+        slim: list[dict[str, Any]] = []
+        for rec in payload[:64]:
+            if not isinstance(rec, dict):
+                continue
+            try:
+                pid = int(rec.get("pid") or 0)
+            except (TypeError, ValueError):
+                continue
+            if pid <= 0:
+                continue
+            slim.append({
+                "pid": pid,
+                "pgid": rec.get("pgid"),
+                "fence_token": rec.get("fence_token"),
+                "runner_id": rec.get("runner_id"),
+                "command": str(rec.get("command") or "")[:400],
+                "created_at": rec.get("created_at"),
+            })
+        with self._conn() as conn:
+            cur = conn.execute(
+                """UPDATE jobs SET active_children = %s::jsonb, updated_at = %s
+                   WHERE id = %s AND status = 'running'
+                     AND lease_owner = %s AND fence_token = %s""",
+                (json.dumps(slim), now, job_id, runner_id, int(fence_token)),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+
     def complete(
         self,
         job_id: int,
@@ -197,6 +248,7 @@ class JobQueueRepo:
                        status = 'done',
                        result = %s,
                        checkpoint = '{}'::jsonb,
+                       active_children = '[]'::jsonb,
                        lease_owner = NULL,
                        lease_expires_at = NULL,
                        completed_at = %s,
@@ -250,6 +302,7 @@ class JobQueueRepo:
                            error = %s,
                            lease_owner = NULL,
                            lease_expires_at = NULL,
+                           active_children = '[]'::jsonb,
                            available_at = %s,
                            updated_at = %s
                        WHERE id = %s AND status = 'running'
@@ -264,6 +317,7 @@ class JobQueueRepo:
                            error = %s,
                            result = %s,
                            checkpoint = '{}'::jsonb,
+                           active_children = '[]'::jsonb,
                            lease_owner = NULL,
                            lease_expires_at = NULL,
                            completed_at = %s,
@@ -284,6 +338,7 @@ class JobQueueRepo:
                        status = 'cancelled',
                        error = %s,
                        checkpoint = '{}'::jsonb,
+                       active_children = '[]'::jsonb,
                        lease_owner = NULL,
                        lease_expires_at = NULL,
                        completed_at = %s,

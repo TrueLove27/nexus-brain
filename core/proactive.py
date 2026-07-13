@@ -64,6 +64,8 @@ class ProactiveDaemon:
         proactive_cfg = engine.config.get("proactive") or {}
         self._retry = InboxRetryTracker.from_config(data_dir, proactive_cfg)
         self._queue = DurableJobQueue.from_engine(engine)
+        if self._queue is not None:
+            self._queue.bind_subprocess_persist()
 
     def start(self) -> None:
         if self._running:
@@ -164,6 +166,10 @@ class ProactiveDaemon:
             hb = _LeaseHeartbeat(self._queue, job_id, fence_token, attempt=attempt)
             hb.start()
 
+            from core.tool_subprocess import arm_job_cancel, clear_job_cancel, reap_job_fence
+
+            arm_job_cancel(job_id)
+
             def _save_checkpoint(cp: dict) -> bool:
                 return self._queue.save_checkpoint(
                     job_id,
@@ -186,6 +192,20 @@ class ProactiveDaemon:
                 self._log("task_error", {"goal": goal[:200], "error": str(e), "job_id": job_id})
             finally:
                 hb.stop()
+                if hb.lost.is_set():
+                    reaped = reap_job_fence(
+                        job_id,
+                        fence_token,
+                        reason="fenced_out",
+                    )
+                    if reaped:
+                        self._log("subprocesses_reaped", {
+                            "job_id": job_id,
+                            "fence_token": fence_token,
+                            "count": len(reaped),
+                            "reason": "fenced_out",
+                        })
+                clear_job_cancel(job_id)
 
             # Lease stolen mid-run: do not complete/fail — new owner owns the row.
             # Checkpoint already durable on the jobs row for the reclaiming runner.
