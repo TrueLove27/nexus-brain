@@ -39,6 +39,8 @@ class NexusEngine:
         data_dir = root / brain_cfg["data_dir"]
         data_dir.mkdir(parents=True, exist_ok=True)
         (data_dir / "inbox").mkdir(exist_ok=True)
+        (data_dir / "inbox" / "processed").mkdir(exist_ok=True)
+        (data_dir / "inbox" / "failed").mkdir(exist_ok=True)
         (data_dir / "logs").mkdir(exist_ok=True)
 
         self.memory: MemoryBackend = create_memory(brain_cfg, llm_cfg, root)
@@ -83,6 +85,15 @@ class NexusEngine:
 
         inbox = self.root / "data" / "inbox"
         inbox_pending = len(list(inbox.glob("*.txt"))) if inbox.exists() else 0
+        inbox_failed = len(list((inbox / "failed").glob("*.txt"))) if (inbox / "failed").exists() else 0
+        inbox_retries = 0
+        retries_path = inbox / "retries.json"
+        if retries_path.exists():
+            try:
+                import json
+                inbox_retries = len(json.loads(retries_path.read_text(encoding="utf-8")).get("tasks") or {})
+            except Exception:
+                inbox_retries = 0
 
         pg_ok = False
         if self.memory.storage_type == "postgres":
@@ -104,6 +115,8 @@ class NexusEngine:
             "postgres": pg_ok if self.memory.storage_type == "postgres" else "n/a",
             "memory_db": str(self.memory.db_path),
             "inbox_queue": inbox_pending,
+            "inbox_retries": inbox_retries,
+            "inbox_failed": inbox_failed,
             "portfolio_pending": bridge.pending_count(),
             "portfolio_done": bridge.completed_count(),
         }

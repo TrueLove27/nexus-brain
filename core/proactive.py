@@ -9,6 +9,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from core.inbox_retry import InboxRetryTracker
+
+FAILURE_STATUSES = frozenset({"failed", "incomplete", "error"})
+
 
 class ProactiveDaemon:
     def __init__(self, engine, interval: int = 30, on_task_complete: Callable | None = None):
@@ -18,6 +22,9 @@ class ProactiveDaemon:
         self._running = False
         self._thread: threading.Thread | None = None
         self.log_path = engine.root / "data" / "logs" / "proactive.jsonl"
+        data_dir = Path(engine.memory.data_dir)
+        proactive_cfg = engine.config.get("proactive") or {}
+        self._retry = InboxRetryTracker.from_config(data_dir, proactive_cfg)
 
     def start(self) -> None:
         if self._running:
@@ -36,7 +43,11 @@ class ProactiveDaemon:
             f.write(json.dumps(entry) + "\n")
 
     def _loop(self) -> None:
-        self._log("daemon_start", {"interval": self.interval})
+        self._log("daemon_start", {
+            "interval": self.interval,
+            "retry_max_attempts": self._retry.max_attempts,
+            "retry_base_delay_seconds": self._retry.base_delay_seconds,
+        })
         while self._running:
             try:
                 self._tick()
@@ -44,12 +55,41 @@ class ProactiveDaemon:
                 self._log("tick_error", {"error": str(e)})
             time.sleep(self.interval)
 
+    def _handle_result(self, task: str, result: dict) -> None:
+        status = (result or {}).get("status") or "failed"
+        if status == "done":
+            # Successful tasks must not be re-queued.
+            cleared = self._retry.clear(task)
+            if cleared:
+                self._log("retry_cleared", {"goal": task[:200]})
+            return
+
+        if status not in FAILURE_STATUSES:
+            # Unknown statuses treated as incomplete so they are not lost.
+            status = "incomplete"
+
+        error = str((result or {}).get("result") or status)
+        outcome = self._retry.record_failure(task, status, error)
+        self._log("inbox_retry", {
+            "goal": task[:200],
+            "status": status,
+            **{k: v for k, v in outcome.items() if k != "goal"},
+        })
+
     def _tick(self) -> None:
+        for info in self._retry.reclaim_due():
+            self._log("retry_reclaimed", info)
+
         tasks = self.engine.memory.get_pending_inbox_tasks()
         for task in tasks:
             self._log("inbox_task", {"goal": task[:200]})
-            result = self.engine.run(task)
+            try:
+                result = self.engine.run(task)
+            except Exception as e:
+                result = {"status": "failed", "result": str(e)}
+                self._log("task_error", {"goal": task[:200], "error": str(e)})
             self._log("task_complete", {"goal": task[:200], "status": result.get("status")})
+            self._handle_result(task, result)
             if self.on_task_complete:
                 self.on_task_complete(task, result)
 

@@ -228,16 +228,8 @@ class BrainMemory:
         return "\n".join(parts)
 
     def get_pending_inbox_tasks(self) -> list[str]:
-        inbox = self.data_dir / "inbox"
-        if not inbox.exists():
-            return []
-        tasks = []
-        for f in sorted(inbox.glob("*.txt")):
-            tasks.append(f.read_text(encoding="utf-8").strip())
-            processed = inbox / "processed"
-            processed.mkdir(exist_ok=True)
-            f.rename(processed / f.name)
-        return tasks
+        from brain.inbox import get_pending_inbox_tasks
+        return get_pending_inbox_tasks(self.data_dir)
 
     def ensure_conversation(self, session_key: str = "default") -> int:
         return 0

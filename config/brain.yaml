@@ -41,3 +41,7 @@ proactive:
   enabled: true
   watch_inbox: true
   scan_on_start: true
+  retry:
+    max_attempts: 4          # total runs before data/inbox/failed/
+    base_delay_seconds: 30   # 30s → 60s → 120s → …
+    backoff_multiplier: 2

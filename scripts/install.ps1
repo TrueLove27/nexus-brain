@@ -14,7 +14,7 @@ if (-not $ollama) {
 }
 
 # Create data directories
-@("data\inbox", "data\logs", "data\workflows", "data\spawned_agents", "data\inbox\processed") | ForEach-Object {
+@("data\inbox", "data\logs", "data\workflows", "data\spawned_agents", "data\inbox\processed", "data\inbox\failed") | ForEach-Object {
     New-Item -ItemType Directory -Force -Path $_ | Out-Null
 }
 
