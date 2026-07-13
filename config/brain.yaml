@@ -32,6 +32,8 @@ brain:
     max_attempts: 4
     retry_base_seconds: 30
     retry_backoff: 2.0
+    # ReAct checkpoint rolling compaction (multi-reclaim context safety)
+    # keep_recent_in_transcript=8, max_stored_steps=24 — see core/react_checkpoint.py
 
 portfolio:
   engine_root: C:\Users\cheki\Desktop\New folder (2)\portfolio-growth-engine

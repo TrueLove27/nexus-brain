@@ -158,6 +158,7 @@ class ProactiveDaemon:
                 "prev_owner": job.get("prev_owner"),
                 "resume_checkpoint": resuming,
                 "checkpoint_steps": int(checkpoint.get("step_count") or len(checkpoint.get("steps") or [])),
+                "checkpoint_compacted": int(checkpoint.get("compacted_count") or 0),
             })
 
             hb = _LeaseHeartbeat(self._queue, job_id, fence_token, attempt=attempt)

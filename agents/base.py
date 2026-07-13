@@ -13,6 +13,7 @@ from core.react_checkpoint import (
     build_checkpoint,
     checkpoint_has_progress,
     rebuild_messages_from_checkpoint,
+    trim_react_messages,
 )
 from core.summary import summarize_incomplete
 
@@ -79,6 +80,8 @@ When done:
         stuck_sent = False
         start_i = 0
         resumed = False
+        transcript_summary = ""
+        compacted_count = 0
 
         if checkpoint_has_progress(resume_checkpoint):
             (
@@ -89,6 +92,8 @@ When done:
                 parse_failures,
                 wind_down_sent,
                 stuck_sent,
+                transcript_summary,
+                compacted_count,
             ) = rebuild_messages_from_checkpoint(
                 system_content=system_content,
                 goal=goal,
@@ -192,20 +197,28 @@ When done:
             })
 
             # Durable job: persist after each successful tool iteration for lease-resume.
-            save_step_checkpoint(
-                build_checkpoint(
-                    steps=steps,
-                    next_iteration=i + 1,
-                    recent_actions=recent_actions,
-                    parse_failures=parse_failures,
-                    wind_down_sent=wind_down_sent,
-                    stuck_sent=stuck_sent,
-                    agent_id=self.agent_id,
-                )
+            # Rolling compaction folds older steps into transcript_summary so multi-reclaim
+            # resumes stay within LLM context limits.
+            cp = build_checkpoint(
+                steps=steps,
+                next_iteration=i + 1,
+                recent_actions=recent_actions,
+                parse_failures=parse_failures,
+                wind_down_sent=wind_down_sent,
+                stuck_sent=stuck_sent,
+                agent_id=self.agent_id,
+                transcript_summary=transcript_summary,
+                compacted_count=compacted_count,
             )
+            save_step_checkpoint(cp)
+            transcript_summary = str(cp.get("transcript_summary") or "")
+            compacted_count = int(cp.get("compacted_count") or 0)
+            # Keep in-memory steps aligned with what is durably stored (window + summary).
+            steps = list(cp.get("steps") or steps)
 
             messages.append({"role": "assistant", "content": response})
             messages.append({"role": "user", "content": f"Tool result for {act}:\n{tool_result}\n\nContinue toward the goal. Call finish when done."})
+            messages = trim_react_messages(messages)
 
         else:
             final_result = summarize_incomplete(steps, goal)
