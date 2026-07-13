@@ -164,6 +164,20 @@ def inbox_queue(root: Path, recent_limit: int = 5) -> dict[str, Any]:
     }
 
 
+def job_queue_status(health: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Surface durable Postgres queue depth from a health payload when present."""
+    if not health:
+        return None
+    if health.get("storage") != "postgres":
+        return None
+    return {
+        "pending": int(health.get("job_queue_pending") or 0),
+        "running": int(health.get("job_queue_running") or 0),
+        "failed": int(health.get("job_queue_failed") or 0),
+        "backend": "postgres",
+    }
+
+
 def build_runtime_status(root: Path, health: dict[str, Any] | None = None) -> dict[str, Any]:
     """Aggregate session + queue (+ optional health fields) for UI /api."""
     session = session_progress(root)
@@ -173,6 +187,12 @@ def build_runtime_status(root: Path, health: dict[str, Any] | None = None) -> di
         "queue": queue,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
+    jq = job_queue_status(health)
+    if jq is not None:
+        payload["job_queue"] = jq
+        # Prefer durable depth for a single top-level queue count when Postgres is live.
+        queue = {**queue, "durable_pending": jq["pending"], "durable_running": jq["running"]}
+        payload["queue"] = queue
     if health:
         payload["health"] = {
             "ollama": health.get("ollama"),
@@ -181,6 +201,9 @@ def build_runtime_status(root: Path, health: dict[str, Any] | None = None) -> di
             "inbox_queue": health.get("inbox_queue"),
             "inbox_retries": health.get("inbox_retries"),
             "inbox_failed": health.get("inbox_failed"),
+            "job_queue_pending": health.get("job_queue_pending"),
+            "job_queue_running": health.get("job_queue_running"),
+            "job_queue_failed": health.get("job_queue_failed"),
             "portfolio_pending": health.get("portfolio_pending"),
             "portfolio_done": health.get("portfolio_done"),
         }

@@ -12,6 +12,7 @@ from psycopg.rows import dict_row
 
 from brain.embeddings import cosine_similarity, embed_text, rank_by_embedding
 from brain.repos.conversations import ConversationRepo
+from brain.repos.job_queue import JobQueueRepo
 from brain.repos.messages import MessageRepo
 from brain.repos.preferences import PreferenceRepo
 from brain.repos.tasks import TaskRepo
@@ -34,6 +35,7 @@ class PostgresMemory:
         self.tasks = TaskRepo(self._conn)
         self.tool_calls = ToolCallRepo(self._conn)
         self.preferences = PreferenceRepo(self._conn)
+        self.job_queue = JobQueueRepo(self._conn)
         self._conversation_id: int | None = None
 
     def _conn(self):
@@ -206,3 +208,6 @@ class PostgresMemory:
     def get_pending_inbox_tasks(self) -> list[str]:
         from brain.inbox import get_pending_inbox_tasks
         return get_pending_inbox_tasks(self.data_dir)
+
+    def job_queue_depth(self) -> dict[str, int]:
+        return self.job_queue.depth()

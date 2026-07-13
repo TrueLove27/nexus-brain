@@ -26,6 +26,11 @@ brain:
   stuck_action_threshold: 3
   wind_down_at_iteration: 24
   learn_from_every_task: true
+  job_queue:
+    lease_seconds: 300       # claim expires; concurrent runners reclaim stale leases
+    max_attempts: 4
+    retry_base_seconds: 30
+    retry_backoff: 2.0
 
 portfolio:
   engine_root: C:\Users\cheki\Desktop\New folder (2)\portfolio-growth-engine

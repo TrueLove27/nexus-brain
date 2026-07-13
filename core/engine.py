@@ -104,6 +104,16 @@ class NexusEngine:
             except Exception:
                 pg_ok = False
 
+        job_pending = job_running = job_failed = 0
+        if pg_ok and hasattr(self.memory, "job_queue_depth"):
+            try:
+                depth = self.memory.job_queue_depth()
+                job_pending = depth.get("pending", 0)
+                job_running = depth.get("running", 0)
+                job_failed = depth.get("failed", 0)
+            except Exception:
+                pass
+
         bridge = PortfolioBridge.from_engine(self)
         model_pulled = self.llm.is_available()
 
@@ -117,6 +127,9 @@ class NexusEngine:
             "inbox_queue": inbox_pending,
             "inbox_retries": inbox_retries,
             "inbox_failed": inbox_failed,
+            "job_queue_pending": job_pending,
+            "job_queue_running": job_running,
+            "job_queue_failed": job_failed,
             "portfolio_pending": bridge.pending_count(),
             "portfolio_done": bridge.completed_count(),
         }
