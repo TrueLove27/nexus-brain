@@ -27,6 +27,7 @@ def register_shell_tools(registry: ToolRegistry) -> None:
             ["powershell", "-NoProfile", "-Command", command],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, cwd=work_dir or str(registry.workspace),
+            env=registry.child_env(),
         )
         lines = []
         for line in proc.stdout:
@@ -46,6 +47,16 @@ def register_shell_tools(registry: ToolRegistry) -> None:
         return registry.run_powershell(cmd)
 
     def check_env(var_name: str = "") -> str:
+        # Runs inside a scrubbed child — host API keys/tokens are not visible.
+        policy = getattr(registry, "env_policy", None)
+        if policy is None:
+            from core.subprocess_env import get_env_policy
+            policy = get_env_policy()
+        if var_name and policy.should_strip(var_name):
+            return (
+                f"(scrubbed) '{var_name}' is withheld from tool subprocesses "
+                f"and is not readable via check_env"
+            )
         if var_name:
             return registry.run_powershell(f'echo "$env:{var_name}"')
         return registry.run_powershell(

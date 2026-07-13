@@ -70,3 +70,8 @@ tool_policy:
     window_seconds: 60
     max_tool_calls: 120      # per runner id (host:pid)
     max_llm_calls: 40        # LLM burst cap per runner / window
+  # Strip host API keys/tokens from env inherited by shell/code runners
+  env_scrub:
+    enabled: true
+    deny: []                 # extra env names to always strip (case-insensitive)
+    allow: []                # escape hatch: keep these even if they look sensitive

@@ -17,6 +17,7 @@ from tools.registry import ToolRegistry
 from core.events import EventBus
 from core.job_context import get_job_id, job_scope
 from core.job_queue import default_runner_id
+from core.subprocess_env import SubprocessEnvPolicy, set_env_policy
 from core.tool_policy import PolicyGuardedLLM, ToolPolicy
 
 
@@ -39,6 +40,8 @@ class NexusEngine:
             workspace=paths["workspace"],
             runner_id=self.runner_id,
         )
+        self.env_policy = SubprocessEnvPolicy.from_config(self.config)
+        set_env_policy(self.env_policy)
         raw_llm = OllamaProvider(
             model=llm_cfg["model"],
             base_url=llm_cfg["base_url"],
@@ -58,7 +61,11 @@ class NexusEngine:
             workspace=paths["workspace"],
             user_notes_path=data_dir / "user_preferences.md",
         )
-        self.tools = ToolRegistry(paths["workspace"], policy=self.tool_policy)
+        self.tools = ToolRegistry(
+            paths["workspace"],
+            policy=self.tool_policy,
+            env_policy=self.env_policy,
+        )
         self.factory = AgentFactory(
             root / "config" / "agents.yaml",
             self.memory, self.personality, self.llm, self.tools,
@@ -159,6 +166,7 @@ class NexusEngine:
             "portfolio_pending": bridge.pending_count(),
             "portfolio_done": bridge.completed_count(),
             "tool_sandbox": self.tool_policy.status(self.runner_id),
+            "env_scrub": self.env_policy.status(),
         }
 
     def runtime_status(self, *, include_health: bool = True) -> dict[str, Any]:

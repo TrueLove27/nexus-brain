@@ -4,15 +4,26 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
+from core.subprocess_env import SubprocessEnvPolicy, get_env_policy, scrubbed_environ
 from core.tool_policy import ToolPolicy
 
 
 class ToolRegistry:
-    def __init__(self, workspace: str, policy: ToolPolicy | None = None):
+    def __init__(
+        self,
+        workspace: str,
+        policy: ToolPolicy | None = None,
+        env_policy: SubprocessEnvPolicy | None = None,
+    ):
         self.workspace = Path(workspace)
         self.policy = policy
+        self.env_policy = env_policy
         self._tools: dict[str, dict[str, Any]] = {}
         self._register_builtins()
+
+    def child_env(self, extra: dict[str, str] | None = None) -> dict[str, str]:
+        """Environment for tool subprocesses — host secrets scrubbed out."""
+        return scrubbed_environ(extra=extra, policy=self.env_policy or get_env_policy())
 
     def _register_builtins(self) -> None:
         from .filesystem import register_filesystem_tools
@@ -93,6 +104,7 @@ class ToolRegistry:
         result = subprocess.run(
             ["powershell", "-NoProfile", "-Command", command],
             capture_output=True, text=True, cwd=work_dir, timeout=timeout,
+            env=self.child_env(),
         )
         output = (result.stdout + result.stderr).strip()
         return output or f"(exit code {result.returncode})"

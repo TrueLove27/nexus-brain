@@ -24,7 +24,7 @@ def register_repo_tools(registry) -> None:
             return
         cmd = editor if editor in ("cursor", "code") else "cursor"
         try:
-            subprocess.Popen([cmd, str(path)], shell=True)
+            subprocess.Popen([cmd, str(path)], shell=True, env=registry.child_env())
         except Exception:
             registry.run_powershell(f'Start-Process notepad "{path}"')
 
@@ -101,6 +101,7 @@ def register_repo_tools(registry) -> None:
             ["powershell", "-NoProfile", "-Command", command],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, cwd=work_dir,
+            env=registry.child_env(),
         )
         lines = []
         for line in proc.stdout:
