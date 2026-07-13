@@ -80,25 +80,17 @@ class JobQueueRepo:
         """
         Atomically claim one claimable job (pending and available, or expired lease).
         Concurrent workers use SKIP LOCKED so only one runner wins each row.
+        Returns prev_status / prev_owner when a lease was reclaimed.
         """
         now = _now()
         lease_exp = now + timedelta(seconds=max(30, int(lease_seconds)))
         with self._conn() as conn:
             row = conn.execute(
                 """
-                UPDATE jobs SET
-                    status = 'running',
-                    lease_owner = %s,
-                    lease_expires_at = %s,
-                    attempts = attempts + 1,
-                    started_at = COALESCE(started_at, %s),
-                    updated_at = %s,
-                    error = CASE
-                        WHEN status = 'running' THEN COALESCE(error, 'lease_reclaimed')
-                        ELSE error
-                    END
-                WHERE id = (
-                    SELECT id FROM jobs
+                WITH picked AS (
+                    SELECT id, status AS prev_status, lease_owner AS prev_owner,
+                           lease_expires_at AS prev_lease_expires_at
+                    FROM jobs
                     WHERE (
                         status = 'pending' AND available_at <= %s
                     ) OR (
@@ -110,12 +102,33 @@ class JobQueueRepo:
                     FOR UPDATE SKIP LOCKED
                     LIMIT 1
                 )
-                RETURNING *
+                UPDATE jobs j SET
+                    status = 'running',
+                    lease_owner = %s,
+                    lease_expires_at = %s,
+                    attempts = attempts + 1,
+                    started_at = COALESCE(started_at, %s),
+                    updated_at = %s,
+                    error = CASE
+                        WHEN picked.prev_status = 'running'
+                        THEN COALESCE(NULLIF(j.error, ''), 'lease_reclaimed')
+                        ELSE j.error
+                    END
+                FROM picked
+                WHERE j.id = picked.id
+                RETURNING j.*,
+                    picked.prev_status,
+                    picked.prev_owner,
+                    picked.prev_lease_expires_at
                 """,
-                (runner_id, lease_exp, now, now, now, now),
+                (now, now, runner_id, lease_exp, now, now),
             ).fetchone()
             conn.commit()
-        return dict(row) if row else None
+        if not row:
+            return None
+        out = dict(row)
+        out["lease_reclaimed"] = out.get("prev_status") == "running"
+        return out
 
     def heartbeat(
         self,

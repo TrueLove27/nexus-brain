@@ -13,6 +13,7 @@ from psycopg.rows import dict_row
 from brain.embeddings import cosine_similarity, embed_text, rank_by_embedding
 from brain.repos.conversations import ConversationRepo
 from brain.repos.job_queue import JobQueueRepo
+from brain.repos.job_traces import JobTraceRepo
 from brain.repos.messages import MessageRepo
 from brain.repos.preferences import PreferenceRepo
 from brain.repos.tasks import TaskRepo
@@ -36,6 +37,7 @@ class PostgresMemory:
         self.tool_calls = ToolCallRepo(self._conn)
         self.preferences = PreferenceRepo(self._conn)
         self.job_queue = JobQueueRepo(self._conn)
+        self.job_traces = JobTraceRepo(self._conn)
         self._conversation_id: int | None = None
 
     def _conn(self):
@@ -102,8 +104,14 @@ class PostgresMemory:
         if self._conversation_id:
             self.messages.add(self._conversation_id, role, content, task_id)
 
-    def log_tool_steps(self, task_id: int, steps: list[dict]) -> None:
-        self.tool_calls.log_steps(task_id, steps)
+    def log_tool_steps(self, task_id: int, steps: list[dict], job_id: int | None = None) -> None:
+        self.tool_calls.log_steps(task_id, steps, job_id=job_id)
+
+    def job_forensics(self, job_id: int) -> dict | None:
+        return self.job_traces.forensics(job_id)
+
+    def job_trace_summary(self, limit: int = 5) -> dict:
+        return self.job_traces.recent_forensics_summary(limit=limit)
 
     def set_preference(self, key: str, value: str) -> None:
         self.preferences.set(key, value)
@@ -211,3 +219,22 @@ class PostgresMemory:
 
     def job_queue_depth(self) -> dict[str, int]:
         return self.job_queue.depth()
+
+    def record_job_trace(
+        self,
+        job_id: int,
+        event_type: str,
+        *,
+        attempt: int = 1,
+        runner_id: str | None = None,
+        task_id: int | None = None,
+        payload: dict | None = None,
+    ) -> dict | None:
+        return self.job_traces.record(
+            job_id,
+            event_type,
+            attempt=attempt,
+            runner_id=runner_id,
+            task_id=task_id,
+            payload=payload,
+        )

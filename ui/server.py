@@ -49,6 +49,24 @@ def create_app(engine: NexusEngine | None = None) -> FastAPI:
         """Live session progress + inbox task queue (poll-friendly)."""
         return engine.runtime_status()
 
+    @app.get("/jobs/{job_id}/trace")
+    async def job_trace(job_id: int):
+        """Forensics package: job row + lifecycle traces + tool_calls + agent_events."""
+        package = engine.job_forensics(job_id)
+        if package is None:
+            return {"error": "not_found", "job_id": job_id}
+        return package
+
+    @app.get("/jobs/traces/recent")
+    async def recent_job_traces(limit: int = 10):
+        """Recent lease-reclaim and failure traces for ops/debugging."""
+        if not hasattr(engine.memory, "job_trace_summary"):
+            return {"error": "postgres_required"}
+        try:
+            return engine.memory.job_trace_summary(limit=max(1, min(limit, 50)))
+        except Exception as e:
+            return {"error": str(e)}
+
     @app.post("/run")
     async def run_task(req: RunRequest):
         bus.emit("task_start", {"goal": req.goal})
@@ -57,7 +75,9 @@ def create_app(engine: NexusEngine | None = None) -> FastAPI:
             try:
                 result = engine.run(req.goal)
                 bus.emit("task_done", {"goal": req.goal, "status": result.get("status"),
-                                        "result": result.get("result", "")[:2000]})
+                                        "result": result.get("result", "")[:2000],
+                                        "job_id": result.get("job_id"),
+                                        "task_id": result.get("task_id")})
             except Exception as e:
                 bus.emit("task_error", {"goal": req.goal, "error": str(e)})
 

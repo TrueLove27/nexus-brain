@@ -15,6 +15,7 @@ from brain.store import MemoryBackend, create_memory
 from llm.ollama import OllamaProvider
 from tools.registry import ToolRegistry
 from core.events import EventBus
+from core.job_context import get_job_id, job_scope
 
 
 class NexusEngine:
@@ -70,7 +71,13 @@ class NexusEngine:
             if etype in ("heartbeat", "task_start", "task_done", "task_error"):
                 return
             try:
-                self.memory.tool_calls.log_event(None, etype, event)
+                job_id = event.get("job_id")
+                if job_id is None:
+                    job_id = get_job_id()
+                payload = dict(event)
+                if job_id is not None:
+                    payload.setdefault("job_id", job_id)
+                self.memory.tool_calls.log_event(None, etype, payload, job_id=job_id)
             except Exception:
                 pass
 
@@ -105,6 +112,7 @@ class NexusEngine:
                 pg_ok = False
 
         job_pending = job_running = job_failed = 0
+        job_traces: dict = {}
         if pg_ok and hasattr(self.memory, "job_queue_depth"):
             try:
                 depth = self.memory.job_queue_depth()
@@ -113,6 +121,11 @@ class NexusEngine:
                 job_failed = depth.get("failed", 0)
             except Exception:
                 pass
+        if pg_ok and hasattr(self.memory, "job_trace_summary"):
+            try:
+                job_traces = self.memory.job_trace_summary(limit=3)
+            except Exception:
+                job_traces = {}
 
         bridge = PortfolioBridge.from_engine(self)
         model_pulled = self.llm.is_available()
@@ -130,6 +143,10 @@ class NexusEngine:
             "job_queue_pending": job_pending,
             "job_queue_running": job_running,
             "job_queue_failed": job_failed,
+            "job_lease_reclaims": job_traces.get("lease_reclaim_total", 0),
+            "job_failed_traces": job_traces.get("failed_trace_total", 0),
+            "job_recent_reclaims": job_traces.get("recent_reclaims") or [],
+            "job_recent_failures": job_traces.get("recent_failures") or [],
             "portfolio_pending": bridge.pending_count(),
             "portfolio_done": bridge.completed_count(),
         }
@@ -148,17 +165,50 @@ class NexusEngine:
                 return f"Last time we were working on: {goal[:80]}"
         return None
 
-    def run(self, goal: str) -> dict[str, Any]:
+    def run(self, goal: str, *, job_id: int | None = None, job_attempt: int = 1) -> dict[str, Any]:
+        """Execute a goal. When job_id is set, tool_calls/agent_events link to that durable job."""
+        with job_scope(job_id):
+            return self._run_inner(goal, job_id=job_id, job_attempt=job_attempt)
+
+    def _run_inner(
+        self,
+        goal: str,
+        *,
+        job_id: int | None = None,
+        job_attempt: int = 1,
+    ) -> dict[str, Any]:
         self._ensure_session()
         if hasattr(self.memory, "log_message"):
             self.memory.log_message("user", goal)
 
+        if job_id is not None:
+            self.bus.emit("job_started", {
+                "job_id": job_id,
+                "attempt": job_attempt,
+                "goal": goal[:200],
+            })
+            if hasattr(self.memory, "record_job_trace"):
+                try:
+                    self.memory.record_job_trace(
+                        job_id,
+                        "started",
+                        attempt=job_attempt,
+                        payload={"goal": goal[:200]},
+                    )
+                except Exception:
+                    pass
+
         result = self.orchestrator.execute(goal)
         task_id = result.get("task_id")
         steps = result.get("steps", [])
+        if job_id is not None:
+            result = {**result, "job_id": job_id}
 
         if hasattr(self.memory, "log_tool_steps") and task_id:
-            self.memory.log_tool_steps(task_id, steps)
+            try:
+                self.memory.log_tool_steps(task_id, steps, job_id=job_id)
+            except TypeError:
+                self.memory.log_tool_steps(task_id, steps)
 
         reply = result.get("result", "")
         if hasattr(self.memory, "log_message") and reply:
@@ -174,11 +224,17 @@ class NexusEngine:
                 from core.portfolio_bridge import PortfolioBridge
                 marked = PortfolioBridge.from_engine(self).on_task_success(goal)
                 if marked:
-                    self.bus.emit("portfolio_task_done", {"goal": goal[:200]})
+                    self.bus.emit("portfolio_task_done", {"goal": goal[:200], "job_id": job_id})
             except Exception:
                 pass
 
         return result
+
+    def job_forensics(self, job_id: int) -> dict[str, Any] | None:
+        """Aggregate job + traces + tool_calls + agent_events for debugging."""
+        if hasattr(self.memory, "job_forensics"):
+            return self.memory.job_forensics(job_id)
+        return None
 
     def teach(self, preference: str) -> None:
         self.personality.append_user_preference(preference)

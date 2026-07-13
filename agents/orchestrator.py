@@ -163,4 +163,9 @@ class OrchestratorAgent:
             break
 
         self.memory.fail_task(task_id, "Orchestration depth exceeded")
-        return {"status": "failed", "result": "Could not complete after delegation chain", "steps": all_steps}
+        return {
+            "status": "failed",
+            "result": "Could not complete after delegation chain",
+            "steps": all_steps,
+            "task_id": task_id,
+        }

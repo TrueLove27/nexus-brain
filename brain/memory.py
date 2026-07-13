@@ -237,7 +237,7 @@ class BrainMemory:
     def log_message(self, role: str, content: str, task_id: int | None = None) -> None:
         pass
 
-    def log_tool_steps(self, task_id: int, steps: list[dict]) -> None:
+    def log_tool_steps(self, task_id: int, steps: list[dict], job_id: int | None = None) -> None:
         pass
 
     def set_preference(self, key: str, value: str) -> None:

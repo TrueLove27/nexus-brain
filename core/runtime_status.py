@@ -174,6 +174,10 @@ def job_queue_status(health: dict[str, Any] | None) -> dict[str, Any] | None:
         "pending": int(health.get("job_queue_pending") or 0),
         "running": int(health.get("job_queue_running") or 0),
         "failed": int(health.get("job_queue_failed") or 0),
+        "lease_reclaims": int(health.get("job_lease_reclaims") or 0),
+        "failed_traces": int(health.get("job_failed_traces") or 0),
+        "recent_reclaims": health.get("job_recent_reclaims") or [],
+        "recent_failures": health.get("job_recent_failures") or [],
         "backend": "postgres",
     }
 
@@ -204,6 +208,8 @@ def build_runtime_status(root: Path, health: dict[str, Any] | None = None) -> di
             "job_queue_pending": health.get("job_queue_pending"),
             "job_queue_running": health.get("job_queue_running"),
             "job_queue_failed": health.get("job_queue_failed"),
+            "job_lease_reclaims": health.get("job_lease_reclaims"),
+            "job_failed_traces": health.get("job_failed_traces"),
             "portfolio_pending": health.get("portfolio_pending"),
             "portfolio_done": health.get("portfolio_done"),
         }

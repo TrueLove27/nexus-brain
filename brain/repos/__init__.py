@@ -2,6 +2,7 @@
 
 from brain.repos.conversations import ConversationRepo
 from brain.repos.job_queue import JobQueueRepo
+from brain.repos.job_traces import JobTraceRepo
 from brain.repos.messages import MessageRepo
 from brain.repos.preferences import PreferenceRepo
 from brain.repos.tasks import TaskRepo
@@ -14,4 +15,5 @@ __all__ = [
     "ToolCallRepo",
     "PreferenceRepo",
     "JobQueueRepo",
+    "JobTraceRepo",
 ]

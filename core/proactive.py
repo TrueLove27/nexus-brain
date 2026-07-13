@@ -104,33 +104,48 @@ class ProactiveDaemon:
             if not job:
                 break
             goal = job["goal"]
-            job_id = job["id"]
+            job_id = int(job["id"])
+            attempt = int(job.get("attempts") or 1)
             self._log("queue_claim", {
                 "job_id": job_id,
                 "goal": goal[:200],
-                "attempts": job.get("attempts"),
+                "attempts": attempt,
                 "lease_owner": self._queue.runner_id,
+                "lease_reclaimed": bool(job.get("lease_reclaimed")),
+                "prev_owner": job.get("prev_owner"),
             })
             try:
-                result = self.engine.run(goal)
+                result = self.engine.run(goal, job_id=job_id, job_attempt=attempt)
             except Exception as e:
                 result = {"status": "failed", "result": str(e)}
                 self._log("task_error", {"goal": goal[:200], "error": str(e), "job_id": job_id})
 
             status = (result or {}).get("status") or "failed"
+            task_id = (result or {}).get("task_id")
             if status == "done":
-                self._queue.complete(job_id, str((result or {}).get("result") or "done"))
+                self._queue.complete(
+                    job_id,
+                    str((result or {}).get("result") or "done"),
+                    task_id=task_id,
+                    attempt=attempt,
+                )
                 self._retry.clear(goal)
             else:
                 err = str((result or {}).get("result") or status)
                 # Queue owns retry/backoff via attempts + lease reclaim — no file re-queue.
-                updated = self._queue.fail(job_id, err)
+                updated = self._queue.fail(
+                    job_id,
+                    err,
+                    task_id=task_id,
+                    attempt=attempt,
+                )
                 new_status = (updated or {}).get("status")
                 self._log("queue_fail", {
                     "job_id": job_id,
                     "status": new_status,
                     "attempts": (updated or {}).get("attempts"),
                     "will_retry": new_status == "pending",
+                    "task_id": task_id,
                 })
                 if new_status == "failed":
                     from brain.inbox import write_failed_task
@@ -146,6 +161,7 @@ class ProactiveDaemon:
                 "goal": goal[:200],
                 "status": status,
                 "job_id": job_id,
+                "task_id": task_id,
                 "source": "durable_queue",
             })
             if self.on_task_complete:

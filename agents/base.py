@@ -8,6 +8,7 @@ from typing import Any
 
 from tools.registry import ToolRegistry
 from core.events import EventBus
+from core.job_context import get_job_id
 from core.summary import summarize_incomplete
 
 
@@ -129,7 +130,11 @@ When done:
                 messages.append({"role": "user", "content": self.STUCK_MSG})
                 stuck_sent = True
 
-            EventBus.get().emit("agent_action", {"agent": self.name, "action": act, "thought": thought})
+            event_data = {"agent": self.name, "action": act, "thought": thought}
+            jid = get_job_id()
+            if jid is not None:
+                event_data["job_id"] = jid
+            EventBus.get().emit("agent_action", event_data)
             tool_result = self.tools.execute(act, args)
             steps.append({"iteration": i, "action": act, "args": args, "result": tool_result[:2000]})
 
