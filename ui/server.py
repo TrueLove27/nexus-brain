@@ -44,6 +44,11 @@ def create_app(engine: NexusEngine | None = None) -> FastAPI:
     async def health():
         return engine.health_check()
 
+    @app.get("/status")
+    async def status():
+        """Live session progress + inbox task queue (poll-friendly)."""
+        return engine.runtime_status()
+
     @app.post("/run")
     async def run_task(req: RunRequest):
         bus.emit("task_start", {"goal": req.goal})

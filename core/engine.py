@@ -121,6 +121,13 @@ class NexusEngine:
             "portfolio_done": bridge.completed_count(),
         }
 
+    def runtime_status(self, *, include_health: bool = True) -> dict[str, Any]:
+        """Live session progress + inbox queue for desktop UI / status API."""
+        from core.runtime_status import build_runtime_status
+
+        health = self.health_check() if include_health else None
+        return build_runtime_status(self.root, health=health)
+
     def get_session_resume_hint(self) -> str | None:
         if hasattr(self.memory, "conversations"):
             goal = self.memory.conversations.get_last_active_goal()

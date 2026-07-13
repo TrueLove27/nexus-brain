@@ -41,12 +41,15 @@ class NexusApp:
         except tk.TclError:
             pass
 
+        self._status_tick = 0
+        self._last_health: dict | None = None
         apply_dark_scrollbar_style(self.root)
         self._build_ui()
         self.thinking = ThinkingIndicator(self.root, self.status_label, self.chat)
         self.live = LiveWorkspace(self.right_panel)
         self._subscribe_events()
         self._update_footer()
+        self._poll_runtime_status()
         self._welcome()
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -164,6 +167,12 @@ class NexusApp:
         if status and self._working:
             self.thinking.set_phrase(status)
         self.live.handle_event(event)
+        etype = event.get("type", "")
+        if etype in (
+            "session_start", "session_task_start", "session_task_done",
+            "session_summary", "inbox_task", "task_complete", "task_done",
+        ):
+            self._refresh_runtime_status()
 
     def _user_say(self, text: str):
         append_user(self.chat, text)
@@ -218,18 +227,61 @@ class NexusApp:
             self.root.after(0, lambda: self._set_busy(False))
             self.root.after(0, self.live.idle)
 
-    def _update_footer(self):
-        health = self.engine.health_check()
+    def _update_footer(self, status: dict | None = None):
+        snap = status
+        if snap is None:
+            try:
+                snap = self.engine.runtime_status(include_health=True)
+                self._last_health = snap.get("health")
+            except Exception:
+                snap = {"session": {}, "queue": {}, "health": self._last_health or {}}
+        health = snap.get("health") or self._last_health or {}
         ollama_ok = health.get("ollama")
         model = health.get("model", "")
         storage = health.get("storage", "")
+        session = snap.get("session") or {}
+        queue = snap.get("queue") or {}
 
-        dot_color = T.GREEN if ollama_ok else T.RED
+        session_state = (session.get("state") or "idle").lower()
+        cycles = int(session.get("cycles") or 0)
+        pending = int(queue.get("pending_count") or health.get("inbox_queue") or 0)
+
+        if ollama_ok is None:
+            dot_color = T.MUTED
+        else:
+            dot_color = T.GREEN if ollama_ok else T.RED
+        if session_state == "running":
+            dot_color = T.AMBER
         self.status_dot.itemconfig("dot", fill=dot_color, outline=dot_color)
-        self.model_label.config(text=model)
+        if model:
+            self.model_label.config(text=model)
+
+        sess_bit = f"Session: {session_state}"
+        if cycles:
+            sess_bit += f" · cycle {cycles}"
+        mem = storage or "—"
         self.footer_label.config(
-            text=f"Memory: {storage}  ·  Workspace: nexus-brain"
+            text=f"{sess_bit}  ·  Queue: {pending}  ·  Memory: {mem}  ·  Workspace: nexus-brain"
         )
+
+    def _refresh_runtime_status(self, *, with_health: bool = False) -> None:
+        try:
+            snap = self.engine.runtime_status(include_health=with_health)
+        except Exception:
+            return
+        if with_health and snap.get("health"):
+            self._last_health = snap["health"]
+        elif self._last_health and "health" not in snap:
+            snap = {**snap, "health": self._last_health}
+        self.live.update_runtime_status(snap)
+        self._update_footer(snap)
+
+    def _poll_runtime_status(self) -> None:
+        self._status_tick += 1
+        # Health hits Ollama — only every ~15s (tick 6 @ 2.5s)
+        with_health = self._status_tick == 1 or self._status_tick % 6 == 0
+        self._refresh_runtime_status(with_health=with_health)
+        self.root.after(2500, self._poll_runtime_status)
 
     def _on_close(self):
         self.thinking.stop()

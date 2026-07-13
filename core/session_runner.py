@@ -102,6 +102,9 @@ class SessionRunner:
         results: list[dict] = []
 
         self._log("session_start", {"hours": self.hours, "pending": bridge.pending_count()})
+        bus = getattr(self.engine, "bus", None)
+        if bus is not None:
+            bus.emit("session_start", {"hours": self.hours, "pending": bridge.pending_count()})
 
         while time.time() < end:
             cycles += 1
@@ -112,6 +115,8 @@ class SessionRunner:
 
             task_text = bridge.next_unchecked_task() or "portfolio task"
             self._log("task_start", {"cycle": cycles, "task": task_text[:200]})
+            if bus is not None:
+                bus.emit("session_task_start", {"cycle": cycles, "task": task_text[:200]})
 
             if on_task:
                 on_task(task_text)
@@ -120,6 +125,8 @@ class SessionRunner:
             status = result.get("status", "unknown")
             results.append({"cycle": cycles, "task": task_text, "status": status})
             self._log("task_done", {"cycle": cycles, "status": status})
+            if bus is not None:
+                bus.emit("session_task_done", {"cycle": cycles, "status": status, "task": task_text[:200]})
 
             remaining = end - time.time()
             if remaining <= 0:
@@ -145,7 +152,6 @@ class SessionRunner:
         summary["summary_md"] = str(paths["md"])
         summary["summary_json"] = str(paths["json"])
 
-        bus = getattr(self.engine, "bus", None)
         if bus is not None:
             bus.emit(
                 "session_summary",

@@ -45,6 +45,9 @@ class LiveWorkspace:
         )
         self.now_label.pack(fill="x", pady=(0, 12))
 
+        # Session progress + task queue (poll-driven)
+        self._build_status_block(content)
+
         def _section(title: str) -> tk.Frame:
             tk.Label(
                 content, text=title, bg=T.BG, fg=T.MUTED,
@@ -75,6 +78,133 @@ class LiveWorkspace:
         self._code_path = ""
         self._term_lines = 0
         self._max_term_lines = 80
+        self._last_status_key = ""
+
+    def _build_status_block(self, parent: tk.Widget) -> None:
+        tk.Label(
+            parent, text="SESSION", bg=T.BG, fg=T.MUTED,
+            font=(T.FONT_UI[0], 8, "bold"),
+        ).pack(anchor="w", pady=(0, 4))
+
+        session_box = tk.Frame(
+            parent, bg=T.SURFACE, highlightthickness=1, highlightbackground=T.BORDER,
+        )
+        session_box.pack(fill="x", pady=(0, 10))
+        inner = tk.Frame(session_box, bg=T.SURFACE)
+        inner.pack(fill="x", padx=12, pady=10)
+
+        top = tk.Frame(inner, bg=T.SURFACE)
+        top.pack(fill="x")
+        self.session_state = tk.Label(
+            top, text="Idle", bg=T.SURFACE, fg=T.MUTED,
+            font=(T.FONT_UI[0], 10, "bold"), anchor="w",
+        )
+        self.session_state.pack(side="left")
+        self.session_meta = tk.Label(
+            top, text="—", bg=T.SURFACE, fg=T.MUTED,
+            font=(T.FONT_UI[0], 9), anchor="e",
+        )
+        self.session_meta.pack(side="right")
+
+        self.session_task = tk.Label(
+            inner, text="No session yet", bg=T.SURFACE, fg=T.TEXT_SECONDARY,
+            font=(T.FONT_UI[0], 9), anchor="w", justify="left", wraplength=400,
+        )
+        self.session_task.pack(fill="x", pady=(6, 0))
+
+        tk.Label(
+            parent, text="TASK QUEUE", bg=T.BG, fg=T.MUTED,
+            font=(T.FONT_UI[0], 8, "bold"),
+        ).pack(anchor="w", pady=(4, 4))
+
+        queue_box = tk.Frame(
+            parent, bg=T.SURFACE, highlightthickness=1, highlightbackground=T.BORDER,
+        )
+        queue_box.pack(fill="x", pady=(0, 12))
+        self.queue_text = tk.Label(
+            queue_box,
+            text="Inbox empty",
+            bg=T.SURFACE,
+            fg=T.TEXT_SECONDARY,
+            font=(T.FONT_UI[0], 9),
+            anchor="nw",
+            justify="left",
+            wraplength=400,
+            padx=12,
+            pady=10,
+        )
+        self.queue_text.pack(fill="x")
+
+    def update_runtime_status(self, status: dict) -> None:
+        """Refresh session + queue from engine.runtime_status() snapshot."""
+        session = status.get("session") or {}
+        queue = status.get("queue") or {}
+
+        key = (
+            session.get("state"),
+            session.get("cycles"),
+            session.get("last_status"),
+            session.get("last_task"),
+            queue.get("pending_count"),
+            tuple(i.get("goal") for i in (queue.get("pending") or [])),
+            tuple(i.get("goal") for i in (queue.get("recent") or [])),
+        )
+        if key == self._last_status_key:
+            return
+        self._last_status_key = key
+
+        state = (session.get("state") or "idle").lower()
+        cycles = int(session.get("cycles") or 0)
+        completed = int(session.get("completed") or 0)
+        failed = int(session.get("failed") or 0)
+        last_status = session.get("last_status") or "—"
+        last_task = (session.get("last_task") or "").strip()
+
+        if state == "running":
+            self.session_state.config(text="Running", fg=T.GREEN)
+        else:
+            self.session_state.config(text="Idle", fg=T.MUTED)
+
+        meta_bits = [f"cycle {cycles}" if cycles else "no cycles"]
+        if completed or failed:
+            meta_bits.append(f"{completed} ok / {failed} fail")
+        self.session_meta.config(text=" · ".join(meta_bits))
+
+        if last_task:
+            self.session_task.config(
+                text=f"Last: {last_status} — {last_task[:120]}",
+                fg=T.TEXT_SECONDARY,
+            )
+        elif state == "running":
+            self.session_task.config(text="Session active…", fg=T.NOW_COLOR)
+        else:
+            self.session_task.config(text="No session yet", fg=T.MUTED)
+
+        lines: list[str] = []
+        pending = queue.get("pending") or []
+        pending_count = int(queue.get("pending_count") or len(pending))
+        if pending:
+            lines.append(f"Pending ({pending_count})")
+            for item in pending[:6]:
+                lines.append(f"  · {item.get('goal') or item.get('file')}")
+            if pending_count > 6:
+                lines.append(f"  · +{pending_count - 6} more")
+        else:
+            lines.append("Pending (0) — inbox empty")
+
+        recent = queue.get("recent") or []
+        if recent:
+            lines.append("")
+            lines.append("Recent")
+            for item in recent[:4]:
+                lines.append(f"  · {item.get('goal') or item.get('file')}")
+
+        failed_count = int(queue.get("failed_count") or 0)
+        if failed_count:
+            lines.append("")
+            lines.append(f"Failed archive: {failed_count}")
+
+        self.queue_text.config(text="\n".join(lines), fg=T.TEXT_SECONDARY)
 
     def reset(self) -> None:
         self.now_label.config(text="Working…", fg=T.ACCENT)
@@ -96,6 +226,15 @@ class LiveWorkspace:
         widget.configure(state="disabled")
 
     def handle_event(self, event: dict) -> None:
+        etype = event.get("type", "")
+        if etype in (
+            "session_start", "session_task_start", "session_task_done",
+            "session_summary", "inbox_task", "task_complete",
+        ):
+            # Parent poll refreshes; mark dirty so next poll redraws.
+            self._last_status_key = ""
+            return
+
         routed = event_to_workspace(event)
         if not routed:
             return
