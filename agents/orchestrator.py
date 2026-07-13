@@ -46,10 +46,32 @@ class OrchestratorAgent:
             f"After UI changes, tell the user to restart the app to see them.\n"
         )
 
+    def _operational_history(self, goal: str) -> str:
+        """Recent tasks + failures for the user message — not the cognitive system prompt."""
+        if hasattr(self.memory, "get_history_context"):
+            try:
+                return self.memory.get_history_context(goal, cognitive=False) or ""
+            except TypeError:
+                # Older backends without the cognitive flag — avoid double-loading by
+                # taking only the operational sections if we can parse them later.
+                return self.memory.get_history_context(goal) or ""
+        return ""
+
     def _chat_reply(self, goal: str, history: str) -> str:
-        memories = self.memory.recall(goal, limit=3)
-        sys_prompt = self.factory.personality.system_prompt(
-            memories, "Nexus — friendly assistant on the user's Windows machine"
+        # Goal-conditioned prompt (fresh prefs + light memory/learnings) — chat, not tools
+        limits = {}
+        if hasattr(self.factory, "_prompt_limits"):
+            limits = dict(self.factory._prompt_limits())
+            limits["max_memories"] = min(3, int(limits.get("max_memories", 3) or 3))
+            limits["max_facts"] = min(2, int(limits.get("max_facts", 2) or 2))
+            limits["max_procedures"] = min(1, int(limits.get("max_procedures", 1) or 1))
+            limits["max_learnings"] = min(3, int(limits.get("max_learnings", 3) or 3))
+            limits["max_kg_lines"] = min(6, int(limits.get("max_kg_lines", 6) or 6))
+        sys_prompt = self.factory.personality.system_prompt_for_goal(
+            goal,
+            self.memory,
+            role="Nexus — friendly assistant on the user's Windows machine",
+            **limits,
         )
         chat_rules = (
             "\n\n## Right now\n"
@@ -77,7 +99,9 @@ class OrchestratorAgent:
     ) -> dict[str, Any]:
         task_id = self.memory.log_task(goal, "orchestrator")
         all_steps: list[dict] = []
-        history = self.memory.get_history_context(goal)
+        # Operational history only — cognitive stack (memories/facts/procs/learnings/KG)
+        # is rebuilt into the specialist system prompt per task via refresh_context.
+        history = self._operational_history(goal)
         context_parts: list[str] = [history] if history else []
 
         if is_capabilities_question(goal):
@@ -139,6 +163,10 @@ class OrchestratorAgent:
 
         while depth < max_depth:
             context = "\n".join(context_parts) if context_parts else ""
+            # Goal-conditioned rebuild (also done inside BaseAgent.run) — keeps
+            # specialist prompts fresh across multi-task / multi-delegate sessions.
+            if hasattr(current_agent, "refresh_context"):
+                current_agent.refresh_context(sub_goal)
             run_kwargs: dict[str, Any] = {"context": context}
             if pending_checkpoint is not None:
                 run_kwargs["resume_checkpoint"] = pending_checkpoint

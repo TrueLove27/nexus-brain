@@ -40,17 +40,49 @@ class AgentFactory:
             self.memory.register_agent(agent_id, spec["name"], spec["role"],
                                        spec.get("capabilities", []), "system")
 
+    def _prompt_limits(self) -> dict[str, int]:
+        tiers = self.brain_cfg.get("memory_tiers") or {}
+        return {
+            "max_memories": int(self.brain_cfg.get("max_context_memories", 8) or 8),
+            "max_facts": int(tiers.get("max_facts_in_context", 5) or 5),
+            "max_procedures": int(tiers.get("max_procedures_in_context", 3) or 3),
+            "max_learnings": 5,
+            "max_kg_lines": 12,
+        }
+
     def _build_agent(self, agent_id: str, name: str, role: str,
                      capabilities: list[str]) -> BaseAgent:
-        memories = self.memory.recall(role, limit=5)
+        # Construct-time prompt is prefs + role only — goal-conditioned recall happens
+        # on each BaseAgent.run / refresh_context(goal), not a stale role snapshot.
         cap_text = f"Your specialties: {', '.join(capabilities)}" if capabilities else ""
-        sys_prompt = self.personality.system_prompt(memories, f"{name} — {role}\n{cap_text}")
+        role_desc = f"{name} — {role}\n{cap_text}".strip()
+        sys_prompt = self.personality.system_prompt([], role_desc)
         return BaseAgent(
             agent_id, name, role, self.llm, self.tools, sys_prompt, self.max_iterations,
             max_parse_retries=self.brain_cfg.get("max_parse_retries", 5),
             stuck_action_threshold=self.brain_cfg.get("stuck_action_threshold", 3),
             wind_down_at_iteration=self.brain_cfg.get("wind_down_at_iteration"),
+            memory=self.memory,
+            personality=self.personality,
+            role_description=role_desc,
+            prompt_limits=self._prompt_limits(),
         )
+
+    def context_refresh_stats(self) -> dict[str, Any]:
+        """Aggregate refresh counts for health / diagnostics."""
+        total = 0
+        per_agent: dict[str, int] = {}
+        for aid, agent in self._agents.items():
+            n = int(getattr(agent, "context_refresh_count", 0) or 0)
+            per_agent[aid] = n
+            total += n
+        builds = int(getattr(self.personality, "goal_prompt_builds", 0) or 0)
+        return {
+            "enabled": True,
+            "agent_refreshes": total,
+            "prompt_builds": builds,
+            "per_agent": per_agent,
+        }
 
     def get(self, agent_id: str) -> BaseAgent | None:
         return self._agents.get(agent_id)

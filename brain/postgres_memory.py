@@ -1197,7 +1197,12 @@ class PostgresMemory:
                 pass
         return matches
 
-    def get_history_context(self, goal: str) -> str:
+    def get_history_context(self, goal: str, *, cognitive: bool = True) -> str:
+        """cognitive=False → operational (conversation + recent/failed tasks) only.
+
+        Prefer this when specialists refresh goal-conditioned prompts via
+        personality.system_prompt_for_goal / agent.refresh_context.
+        """
         parts: list[str] = []
         mem_limit = self.max_context_memories
 
@@ -1206,9 +1211,11 @@ class PostgresMemory:
             if conv_ctx:
                 parts.append(conv_ctx)
 
-        pref_ctx = self.preferences.format_for_prompt()
-        if pref_ctx:
-            parts.append(pref_ctx)
+        # Prefs live in the system prompt when goal-conditioned rebuild is used
+        if cognitive:
+            pref_ctx = self.preferences.format_for_prompt()
+            if pref_ctx:
+                parts.append(pref_ctx)
 
         recent = self.get_recent_tasks(limit=8)
         if recent:
@@ -1222,6 +1229,9 @@ class PostgresMemory:
             parts.append("\n## Past failures on similar goals (do NOT repeat these)")
             for t in failed:
                 parts.append(f"- FAILED: {t['goal'][:120]} -> {(t.get('result') or '')[:150]}")
+
+        if not cognitive:
+            return "\n".join(parts)
 
         learnings = self.get_learnings_for_goal(goal, limit=5)
         if learnings:

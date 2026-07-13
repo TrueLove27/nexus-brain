@@ -826,8 +826,13 @@ class BrainMemory:
             self.bump_learning_use(ids)
         return matches
 
-    def get_history_context(self, goal: str) -> str:
-        """Formatted history so agents avoid repeating past mistakes."""
+    def get_history_context(self, goal: str, *, cognitive: bool = True) -> str:
+        """Formatted history so agents avoid repeating past mistakes.
+
+        cognitive=True (default): full stack including memories/facts/procs/learnings/KG.
+        cognitive=False: operational only (recent tasks + failures) — use when the
+        specialist system prompt already carries goal-conditioned cognitive context.
+        """
         parts: list[str] = []
         recent = self.get_recent_tasks(limit=8)
         if recent:
@@ -841,6 +846,9 @@ class BrainMemory:
             parts.append("\n## Past failures on similar goals (do NOT repeat these)")
             for t in failed:
                 parts.append(f"- FAILED: {t['goal'][:120]} -> {(t.get('result') or '')[:150]}")
+
+        if not cognitive:
+            return "\n".join(parts)
 
         learnings = self.get_learnings_for_goal(goal, limit=5)
         if learnings:

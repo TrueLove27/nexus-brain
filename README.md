@@ -103,6 +103,8 @@ You → Nexus Orchestrator → Specialist Agents → Tools → Your System
       Learning Loop (trains from outcomes)
          ↓
       Multi-tier consolidation (episodes → facts / procedures)
+         ↓
+      Dream consolidation (tool_calls + job_traces → procedures)
 ```
 
 ## Multi-tier memory
@@ -124,6 +126,24 @@ Nexus uses a cognitive memory stack instead of a single flat bag:
 - Manually: `engine.maybe_consolidate(force=True)` from a Python shell, or after enough tasks complete
 
 `get_history_context(goal)` injects semantic facts, procedural patterns, and recent episodes alongside the existing task/learning sections. Health exposes counts under `memory_tiers`.
+
+## Sleep / dream consolidation (telemetry → procedures)
+
+Distinct from episode consolidation above. **Dream** mines execution TELEMETRY — `tool_calls`, `job_traces`, and succeeded/failed tasks — into durable `memory_procedures` patterns (`WHEN … THEN use tool X with …`). Optional facts are written when `brain.dream.write_facts` is true. Near-duplicates are skipped via embedding similarity (`duplicate_similarity`, default 0.88). Progress watermarks live in `data/dream_state.json`.
+
+| Path | Input | Output |
+|------|-------|--------|
+| Episode consolidation | `memory_episodes` | facts + procedures |
+| **Dream consolidation** | tool_calls / job_traces / tasks | procedures (+ optional facts) |
+
+```powershell
+py main.py dream                 # on-demand (ignores interval gate)
+py scripts/dream.py              # same
+py scripts/dream.py --no-force   # respect min_interval + threshold (daemon-like)
+py scripts/dream.py --json       # machine-readable stats
+```
+
+**Proactive daemon:** when the queue is idle for `brain.dream.idle_ticks_before_dream` consecutive ticks and `brain.dream.enabled` is true, Nexus runs `maybe_dream(force=False)` (respects `min_interval_seconds` and `min_telemetry_items`). Toggle / tune under `brain.dream` in `config/brain.yaml`.
 
 ## Hybrid recall (Postgres + pgvector)
 

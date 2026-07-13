@@ -25,6 +25,11 @@ class BaseAgent:
         max_parse_retries: int = 5,
         stuck_action_threshold: int = 3,
         wind_down_at_iteration: int | None = None,
+        *,
+        memory=None,
+        personality=None,
+        role_description: str | None = None,
+        prompt_limits: dict[str, int] | None = None,
     ):
         self.agent_id = agent_id
         self.name = name
@@ -36,6 +41,32 @@ class BaseAgent:
         self.max_parse_retries = max_parse_retries
         self.stuck_action_threshold = stuck_action_threshold
         self.wind_down_at = wind_down_at_iteration or max(int(max_iterations * 0.8), max_iterations - 5)
+        # Goal-conditioned prompt refresh (wired by AgentFactory)
+        self.memory = memory
+        self.personality = personality
+        self.role_description = role_description or f"{name} — {role}"
+        self.prompt_limits = dict(prompt_limits or {})
+        self.context_refresh_count = 0
+        self._context_goal: str | None = None
+
+    def refresh_context(self, goal: str) -> str:
+        """Rebuild system prompt for this goal (memories, facts, learnings, prefs, KG).
+
+        Safe to call before every run; no-ops if personality/memory were not wired.
+        """
+        if not self.personality or not self.memory:
+            return self.system_prompt
+        if not hasattr(self.personality, "system_prompt_for_goal"):
+            return self.system_prompt
+        self.system_prompt = self.personality.system_prompt_for_goal(
+            goal,
+            self.memory,
+            role=self.role_description,
+            **self.prompt_limits,
+        )
+        self._context_goal = goal
+        self.context_refresh_count += 1
+        return self.system_prompt
 
     TOOL_EXAMPLES = """
 ## Tool call examples (copy this format exactly)
@@ -69,6 +100,10 @@ When done:
         *,
         resume_checkpoint: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        # Per-task refresh — specialists must not keep a stale construct-time prompt
+        if goal and self.personality and self.memory:
+            self.refresh_context(goal)
+
         tool_docs = self.tools.descriptions()
         system_content = self.system_prompt + self.TOOL_EXAMPLES
 

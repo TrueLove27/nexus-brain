@@ -206,7 +206,17 @@ class NexusEngine:
             "learning": self._learning_health(),
             "kg_entities": int(kg_stats.get("kg_entities") or 0),
             "kg_relations": int(kg_stats.get("kg_relations") or 0),
+            "goal_conditioned_prompts": self._goal_prompt_health(),
         }
+
+    def _goal_prompt_health(self) -> dict[str, Any]:
+        """Surface goal-conditioned specialist prompt rebuild in health."""
+        if hasattr(self.factory, "context_refresh_stats"):
+            try:
+                return dict(self.factory.context_refresh_stats())
+            except Exception as exc:
+                return {"enabled": True, "error": str(exc)}
+        return {"enabled": True, "agent_refreshes": 0, "prompt_builds": 0}
 
     def _learning_health(self) -> dict[str, Any]:
         if hasattr(self.memory, "learning_stats"):
