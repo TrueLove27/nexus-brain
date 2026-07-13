@@ -119,10 +119,15 @@ def cmd_session(engine: NexusEngine, hours: float = 3.0):
     with console.status("[cyan]Session running..."):
         summary = runner.run(on_task=on_task)
 
+    summary_md = summary.get("summary_md", "")
+    summary_json = summary.get("summary_json", "")
     console.print(Panel(
         f"Cycles: {summary['cycles']}\n"
         f"Completed: {summary['completed']}\n"
-        f"Log: data/logs/session.jsonl",
+        f"Failures: {summary.get('failed', 0)}\n"
+        f"Log: data/logs/session.jsonl\n"
+        f"Report: {summary_md}\n"
+        f"JSON: {summary_json}",
         title="Session Summary",
         border_style="green",
     ))
